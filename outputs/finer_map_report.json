@@ -1,0 +1,30 @@
+{
+  "bag": "/home/autosweep/autosweep/dataset22jul/coverage1_lipede",
+  "map_dir": "/home/autosweep/autosweep/glim_maps/coverage1",
+  "voxel_size_m": 0.03,
+  "truncation_distance_m": 0.12,
+  "min_range_m": 0.5,
+  "max_range_m": 15.0,
+  "bottom_rings": 4,
+  "bottom_ring_min_range_m": 0.8,
+  "edge_jump_m": 0.3,
+  "padding_m": 6.0,
+  "max_image_dt_s": 0.09,
+  "min_weight": 1.5,
+  "scans_processed": 3113,
+  "points_fused": 148069927,
+  "points_coloured_from_rgb_pct": 17.108398385311556,
+  "intensity_normalisation_range": [
+    7.0,
+    1166.0
+  ],
+  "vertices": 5600302,
+  "triangles": 10417942,
+  "grid_dims": [
+    975,
+    932,
+    422
+  ],
+  "observed_voxels": 8828949,
+  "total_voxels": 383471400
+}

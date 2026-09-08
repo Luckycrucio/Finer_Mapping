@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.pyc
+
+cache/*
+!cache/.gitkeep
+
+outputs/coverage1_finer_mesh.obj
+outputs/coverage1_finer_mesh.stl
+outputs/coverage1_finer_mesh.ply
