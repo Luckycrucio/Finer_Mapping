@@ -1,6 +1,6 @@
 # Finer-detail RGB mesh via TSDF fusion
 
-![Mesh preview in a 3D viewer](outputs/mesh_screenshot.png)
+![Mesh preview in a 3D viewer](outputs/coverage1_finer_mesh/mesh_screenshot.png)
 
 This is a second, independent reconstruction of the same environment as
 [`../coverage1_edited/`](../coverage1_edited/), built to get past that
@@ -19,12 +19,20 @@ records what was actually observed along real sensor rays), and adds
 photographic RGB colour where the camera saw a point, instead of grayscale
 LiDAR intensity only.
 
-**Recommended output:** [`outputs/coverage1_finer_mesh.ply`](outputs/coverage1_finer_mesh.ply)
-(binary PLY with per-vertex RGB, 5,855,301 vertices / 10,943,452 triangles in
-the current build — see `outputs/finer_map_report.json` for the exact figures
-behind whatever is currently in `outputs/`). OBJ and STL are also exported;
+Two steps, both taking the bag name:
+
+1. `build_finer_map.py <name>` fuses the raw bag into
+   `outputs/<name>/<name>_finer_mesh.ply` (binary PLY with per-vertex RGB),
+   estimating the floor on the way and discarding below-floor returns.
+2. `refine_mesh.py <name>` post-processes that mesh into
+   `outputs/<name>/<name>_refined_mesh.ply` (**recommended output**): small
+   floating pieces removed, smoothed, floor flattened, small holes filled and
+   decimated to a size a viewer opens comfortably.
+
+See the `finer_map_report.json` / `refine_report.json` next to each mesh for
+the exact figures behind it. OBJ and STL are also exported;
 STL has no portable vertex-colour support, use the PLY for the coloured
-result. [`outputs/preview.png`](outputs/preview.png) is a static top-down
+result. Each output folder's `preview.png` is a static top-down
 scatter render (`make_preview.py`) for a quick look without a mesh viewer.
 See "Visualizing the output" below for how to view either.
 
@@ -46,7 +54,9 @@ that ceiling; the sensor's own angular resolution becomes the limit instead.
 
 ## Source data
 
-- **Bag:** `/home/autosweep/autosweep/dataset22jul/coverage1/coverage1.db3`
+- **Bag:** `/home/autosweep/autosweep/dataset22jul/coverage1_lipede/` (the pipeline
+  always plays the `_lipede` recording; it has the same start time and message
+  count as the plain `coverage1/coverage1.db3`)
   (identified as the source for `coverage1_edited` by matching epoch
   timestamps: the bag starts at 1784717473.91s and `traj_lidar.txt`'s samples
   fall inside the bag's [start, start+311s] window).
@@ -71,6 +81,9 @@ are used — the raw bag starts about 10.6 s before GLIM's first solved pose
 early scans are skipped rather than extrapolated.
 
 ## Pipeline (`build_finer_map.py`)
+
+Passes over the bag: (1) cache camera frames, (2) estimate an intensity
+normalisation range, (3) estimate the floor, (4) fuse every scan.
 
 ### 1. Trajectory interpolation (`src/trajectory.py`)
 
@@ -135,10 +148,55 @@ just the last 4 rings (clearing the observed cluster with margin) rather
 than raising `--min-range` globally, which would also discard legitimate
 close-up detail the upper rings pick up near walls and furniture.
 
-### 4. Colourisation, RGB-first (`src/colorizer.py`)
+### 4. Floor estimation and below-floor rejection (`src/floor.py`)
+
+Points below the floor are not real geometry: they are mostly LiDAR
+multipath returns (the beam bounces off a glossy floor and the sensor records
+a point "inside" it) plus noise. In the earlier coverage1 build
+(`outputs/coverage1_finer_mesh/`), 13.6% of the mesh vertices sat more than
+5 cm under the floor and 5.4% more than 30 cm under it; the current build has
+0.1% and 0%. They are removed *before* fusion rather than cut
+out of the mesh afterwards, so they never create surfaces or blend into
+colours in the first place.
+
+The floor cannot be a fixed world-z cutoff: GLIM's world frame is not
+gravity-aligned (coverage1's floor is tilted ~2.0 deg in it; the LiDAR's own
+z-axis in world coordinates is tilted the same way), and over the whole map
+the floor also drifts a few cm away from any one plane. So the model is a
+global plane plus a coarse per-cell height correction, estimated from every
+`--floor-sample-stride`-th scan:
+
+1. **Candidates**: points whose organized-cloud normal is within 15 deg of the
+   sensor's up axis and that lie within 4 m (horizontally) of the sensor that
+   measured them. The robot drives on the floor, so near the sensor the
+   dominant horizontal surface *is* the floor.
+2. **Mounting height**: a histogram of candidate heights relative to their own
+   sensor position peaks at minus the sensor's mounting height (0.605 m on
+   coverage1); only candidates within 15 cm of the peak are kept. Being
+   relative to the sensor at capture time, this step is immune to trajectory
+   drift in z.
+3. **Global plane, RANSAC then SVD**: SVD is a least-squares fit, so on its
+   own the below-floor outliers this is meant to remove would drag the plane
+   down. RANSAC (normals constrained to within 10 deg of the sensor's up axis)
+   finds the inlier set, then SVD on the inliers alone gives the precise
+   plane (coverage1: 2.4 cm inlier residual std over the whole map, which the
+   per-cell correction then takes up; floor vertices end up a median 0.8 cm
+   from the model).
+4. **Per-cell correction**: the median residual of near-plane candidates in
+   each `--floor-cell-size` (1 m) cell, filled from the nearest measured cell
+   where there were none, median-filtered and clamped to +/-8 cm, then
+   bilinearly interpolated so there are no steps at cell edges.
+
+During fusion, points more than `--floor-margin` (5 cm) below that local floor
+are dropped; `--ceiling-height` optionally drops points more than that far
+above it too. The model is saved as `floor_model.npz` next to the mesh (reused
+by `refine_mesh.py`, or by another build via `--floor-model`), and summarised
+in `finer_map_report.json`.
+
+### 5. Colourisation, RGB-first (`src/colorizer.py`)
 
 `cache_frames()` walks the bag once and saves every `/rgb/image_raw` frame to
-disk as JPEG plus a timestamp index (`cache/frames/`, `cache/timestamps.npy`)
+disk as JPEG plus a timestamp index (`cache/<name>/frames/`, `cache/<name>/timestamps.npy`)
 so the fusion pass never holds more than a handful of full-resolution frames
 in memory.
 
@@ -162,12 +220,12 @@ image, are behind the camera, or lose the z-buffer test fall back to a
 percentile-normalised (1st/99th) grayscale of LiDAR intensity, using the same
 convention as `coverage1_edited/color_intensity.py`. In the run that produced
 the current output, 16.9% of fused points were coloured from RGB (see
-`points_coloured_from_rgb_pct` in `outputs/finer_map_report.json` for
+`points_coloured_from_rgb_pct` in `outputs/<name>/finer_map_report.json` for
 whatever the most recent run actually measured) — the camera has a much
 narrower field of view than the LiDAR's full 360 deg sweep, so most points
 simply never appear in any frame; this is expected, not a bug.
 
-### 5. TSDF volumetric fusion (`src/tsdf_volume.py`)
+### 6. TSDF volumetric fusion (`src/tsdf_volume.py`)
 
 Classic TSDF fusion (KinectFusion, Open3D's `ScalableTSDFVolume`) integrates
 a *pinhole depth image* every frame — that doesn't apply here since a
@@ -191,11 +249,44 @@ NumPy grid stays tractable at room scale without an octree/hash structure),
 and, unlike Poisson, never invents surface far from anywhere a ray actually
 terminated.
 
-The zero level set is extracted with marching cubes (`scikit-image`),
-restricted to voxels with enough accumulated weight (`--min-weight`, plus a
-1-voxel dilation so cubes straddling that boundary are still evaluated) —
-unobserved voxels are never treated as valid surface data. Per-vertex colour
-is sampled from the corresponding voxel's accumulated colour average, and the
+**Free-space carving.** The band update above only ever records surfaces, so
+anything that was there for a while and then left (a person walking past, a
+door that was opened) stays in the map as a ghost: no later measurement
+contradicts it. Every scan, one ray in `--carve-ray-stride` (8) is also walked
+from the sensor up to one truncation distance + one voxel short of its
+endpoint, and every *already-observed* voxel it crossed gets one free-space
+observation (sdf = +truncation, weight `--carve-weight`, 0.2) per scan. A
+surface seen a few times and then repeatedly seen *through* fades away;
+static geometry, observed thousands of times, barely moves. Two guards keep
+real geometry safe: carving never touches voxels nothing has observed yet
+(so it cannot create surface), and it skips voxels within
+`--carve-floor-clearance` (10 cm) of the floor, where near-grazing rays would
+otherwise slowly erode it. Voxel colour averages are preserved. On coverage1
+this removed ~117k vertices, almost all of them the trails people left
+walking through the room during the recording (0.3-1.5 m high, long curved
+bands crossing the robot's route), at the cost of ~40% more fusion time
+(12 min instead of ~8.5 for the full bag).
+
+**Mesh extraction.** The zero level set is extracted with marching cubes
+(`scikit-image`) over cubes whose **8 corners all** have more than
+`--min-weight` accumulated weight. Unobserved voxels hold a +truncation
+placeholder, and any cube that mixes them with real (often negative,
+behind-surface) values produces a fake zero crossing. Earlier builds
+evaluated those boundary cubes, which gave a phantom second floor about 7 cm
+under the real one and "curtains" along every observation boundary.
+(skimage tests its `mask` at a cube's *upper* corner, which is why the
+all-corners mask is built one voxel shifted.) Vertices are placed at voxel
+*centres*, the same convention integration uses; earlier builds were offset
+by half a voxel (-1.5 cm on every axis). On a synthetic flat floor the
+extracted surface now lands within 0.1 cm of the true plane. Together these
+cut the coverage1 mesh from 5.6M to 2.1M vertices without losing measured
+surface: 91% of the earlier build's above-floor vertices are within 15 cm of
+the new mesh (the 7-13 cm band is the removed phantom layer). The rest were
+curtains along observation edges, most of them high up under the roof where
+coverage is sparse. If thin, sparsely seen structures (e.g. roof beams) matter,
+lowering `--min-weight` keeps more of them, at the cost of noisier surface.
+Per-vertex colour
+is sampled from the nearest voxel's accumulated colour average, and the
 mesh is cleaned and given consistent normals with VTK before export
 (`vtkCleanPolyData` + `vtkPolyDataNormals`, matching the finishing step
 `coverage1_edited/finish_mesh.py` uses).
@@ -204,6 +295,12 @@ mesh is cleaned and given consistent normals with VTK before export
 
 | Flag | Default | Meaning |
 |---|---|---|
+| `<name>` (positional) | required | Bag name: reads the bag from `<datasets-root>/<name><bag-suffix>` and the GLIM map/odometry from `<maps-root>/<name>` |
+| `--bag-suffix` | `_lipede` | Appended to `<name>` for the bag directory only (`""` reads the plain recording) |
+| `--datasets-root` / `--maps-root` | `~/autosweep/dataset22jul` / `~/autosweep/glim_maps` | Where the bags and GLIM maps live |
+| `--bag` / `--map-dir` | derived from `<name>` | Override either input directory separately |
+| `--points-topic` / `--image-topic` | `/ouster/points` / `/rgb/image_raw` | Sensor topics (Dome bags record `/ousterDome/points`) |
+| `--out-dir` / `--cache-dir` | `outputs/<name>` / `cache/<name>` | Where results and the camera frame cache go |
 | `--voxel-size` | 0.03 m | TSDF voxel edge length — the main detail/memory/runtime dial |
 | `--truncation` | 4 x voxel size | Half-width of the band around each surface point that gets updated |
 | `--min-range` / `--max-range` | 0.5 / 15.0 m | Discard returns outside this range |
@@ -212,8 +309,17 @@ mesh is cleaned and given consistent normals with VTK before export
 | `--padding` | 6.0 m | Metres of TSDF volume padding around the trajectory bounding box |
 | `--max-image-dt` | 0.09 s | Max time gap between a scan column and the camera frame used to colour it |
 | `--min-weight` | 1.5 | Minimum accumulated TSDF weight for a voxel to count as observed |
+| `--floor-margin` | 0.05 m | Drop points more than this far below the local floor |
+| `--ceiling-height` | off | Drop points more than this far above the floor |
+| `--floor-cell-size` | 1.0 m | Cell size of the floor model's per-cell height correction |
+| `--floor-sample-stride` | 10 | Estimate the floor from every N-th scan |
+| `--floor-model` | none | Reuse a `floor_model.npz` instead of estimating the floor again |
+| `--no-floor-filter` | off | Skip floor estimation and keep below-floor points |
+| `--carve-ray-stride` | 8 | Free-space carving uses one ray in N per scan; 0 disables carving |
+| `--carve-weight` | 0.2 | Weight of one free-space observation per voxel per scan |
+| `--carve-floor-clearance` | 0.10 m | Never carve voxels this close to the floor |
 | `--limit-scans` | none | Debug: process only the first N scans |
-| `--skip-frame-cache` | off | Reuse an existing `cache/` frame dump instead of re-extracting it |
+| `--skip-frame-cache` | off | Reuse an existing `cache/<name>/` frame dump instead of re-extracting it |
 
 **Voxel size is a memory trade-off**, since the TSDF grid is dense (no
 octree): this run's bounding box needed ~380M voxels at 3 cm, ~5 float32
@@ -222,13 +328,56 @@ count (and memory) by roughly 8x — see `finer_map_report.json`'s
 `grid_dims`/`total_voxels` for the actual numbers from this run before
 lowering `--voxel-size` further.
 
+## Refining the mesh (`refine_mesh.py`)
+
+Everything that only needs the finished mesh lives in a separate script, so
+it can be tuned in seconds to minutes without re-running fusion:
+
+```bash
+python3 refine_mesh.py coverage1
+```
+
+It reads `outputs/<name>/<name>_finer_mesh.ply` and `floor_model.npz` and
+writes `outputs/<name>/<name>_refined_mesh.{ply,obj,stl}` plus
+`refine_report.json`. The steps, in order (set a parameter to 0 to skip that
+step):
+
+| Step | Flag (default) | What it does |
+|---|---|---|
+| Clip | `--clip-margin` (0.05 m), `--ceiling-height` (off) | Drops triangles with a vertex below the floor (or above the ceiling). Mostly a safety net, since the build already filters before fusion. |
+| Small pieces | `--min-component` (500 triangles) | Removes disconnected fragments from noise or surfaces glimpsed through glass |
+| Smoothing | `--smooth-iterations` (15), `--smooth-passband` (0.1) | Windowed-sinc (Taubin-style) smoothing: removes marching cubes' voxel-scale stair-steps without the shrinkage of plain Laplacian smoothing |
+| Floor flattening | `--flatten-tolerance` (0.03 m), `--flatten-max-angle` (25 deg) | Projects floor vertices (within tolerance of the floor, normal close to the floor normal) onto the floor model |
+| Hole filling | `--fill-holes` (0.3 m) | Closes holes up to about that size, mostly small gaps in the floor |
+| Decimation | `--decimate` (0.5) | Quadric decimation (geometry only) removing that fraction of triangles, mostly on flat areas; each remaining vertex takes the colour of the nearest pre-decimation vertex |
+
+If `floor_model.npz` is missing (for example a mesh built before floor
+estimation existed), the floor is estimated from the mesh itself, from
+upward-facing vertices near the GLIM trajectory (`--map-dir`, default
+`<maps-root>/<name>`). `--input` refines any other mesh:
+
+```bash
+python3 refine_mesh.py coverage1 --input outputs/coverage1_finer_mesh/coverage1_finer_mesh.ply \
+    --out-dir outputs/coverage1_finer_mesh
+```
+
 ## Running it
 
 ```bash
 cd /home/autosweep/finer_mapping
 source .venv/bin/activate      # created with: python3 -m venv .venv --system-site-packages
-python3 build_finer_map.py
+python3 build_finer_map.py coverage1      # or ./run.sh coverage1
+python3 refine_mesh.py coverage1
 ```
+
+The single argument is the bag name. The bag played is always the `_lipede`
+recording of that name, while the GLIM map, cache and outputs use the plain
+name: `coverage1` reads `/home/autosweep/autosweep/dataset22jul/coverage1_lipede`
+(rosbag2) and `/home/autosweep/autosweep/glim_maps/coverage1` (`traj_lidar.txt`
++ `config/config_sensors.json`), and writes to `outputs/coverage1/`. The script
+stops early with a list of any missing inputs. `--bag-suffix ""` reads the
+plain recording instead, and `--bag`/`--map-dir` override either path
+entirely.
 
 `.venv` was created with `--system-site-packages` so it inherits this
 machine's ROS 2 Jazzy install (`rclpy`, `rosbag2_py`, `sensor_msgs_py`,
@@ -242,9 +391,9 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-`cache/` (camera frame JPEGs + timestamps, ~900 MB) is produced by the first
+`cache/<name>/` (camera frame JPEGs + timestamps, ~900 MB per bag) is produced by the first
 run's pass 1 and reused on subsequent runs via `--skip-frame-cache`; delete
-it to force re-extraction (e.g. after pointing `--bag` at different data).
+it to force re-extraction (e.g. after pointing `--bag` at different data for the same name).
 
 ## Visualizing the output
 
@@ -252,7 +401,7 @@ it to force re-extraction (e.g. after pointing `--bag` at different data).
 machine and reads the PLY's per-vertex RGB directly.
 
 ```bash
-meshlab outputs/coverage1_finer_mesh.ply
+meshlab outputs/coverage1/coverage1_finer_mesh.ply
 ```
 
 `meshlabserver` is also available for headless/scripted use (e.g. batch
@@ -261,15 +410,16 @@ available.
 
 **Quick static preview, no mesh viewer needed:** `make_preview.py` renders a
 random 400k-vertex subsample as a coloured 3D scatter plot with matplotlib
-and writes `outputs/preview.png`. It hardcodes both paths
-(`outputs/coverage1_finer_mesh.ply` in, `outputs/preview.png` out, relative
-to the script), so it takes no arguments and must be re-run after any new
-`build_finer_map.py` run to refresh the preview:
+and writes `outputs/<name>/preview.png`. It takes the bag name (reading
+`outputs/<name>/<name>_finer_mesh.ply`, or `<name>_refined_mesh.ply` with
+`--refined`, which writes `preview_refined.png`) and must be re-run after a
+new build or refine to refresh the preview:
 
 ```bash
 cd /home/autosweep/finer_mapping
 source .venv/bin/activate
-python3 make_preview.py
+python3 make_preview.py coverage1
+python3 make_preview.py coverage1 --refined
 ```
 
 This is a scatter of raw vertices, not the triangulated surface, so it's
@@ -280,19 +430,27 @@ MeshLab for an actual look at surface quality.
 
 | File | Purpose |
 |---|---|
-| `outputs/coverage1_finer_mesh.ply` | Recommended: full mesh with per-vertex RGB |
-| `outputs/coverage1_finer_mesh.obj` | Geometry-only OBJ alternative |
-| `outputs/coverage1_finer_mesh.stl` | Geometry-only STL; assume metres, no colour |
-| `outputs/finer_map_report.json` | Parameters used, scan/point counts, RGB coverage %, mesh/grid statistics |
-| `outputs/preview.png` | Static top-down scatter preview, coloured by actual vertex RGB/intensity |
-| `outputs/build.log` | Console log from the run that produced the current `outputs/` contents |
-| `cache/frames/*.jpg`, `cache/timestamps.npy` | Cached camera frames (pass 1 output, reused across runs) |
-| `make_preview.py` | Regenerates `outputs/preview.png` from the current mesh |
+| `outputs/<name>/<name>_refined_mesh.ply` | Recommended: refined mesh with per-vertex RGB (`refine_mesh.py`) |
+| `outputs/<name>/<name>_refined_mesh.obj` / `.stl` | Geometry-only refined alternatives |
+| `outputs/<name>/refine_report.json` | What each refinement step removed/added, parameters used |
+| `outputs/<name>/<name>_finer_mesh.ply` | Raw fused mesh with per-vertex RGB (`build_finer_map.py`) |
+| `outputs/<name>/<name>_finer_mesh.obj` | Geometry-only OBJ alternative |
+| `outputs/<name>/<name>_finer_mesh.stl` | Geometry-only STL; assume metres, no colour |
+| `outputs/<name>/finer_map_report.json` | Parameters used, scan/point counts, RGB coverage %, mesh/grid statistics |
+| `outputs/<name>/floor_model.npz` | Fitted floor (plane + per-cell correction), reused by `refine_mesh.py` / `--floor-model` |
+| `outputs/<name>/build.log` | Console log of the build, if it was redirected there |
+| `outputs/<name>/preview.png` | Static top-down scatter preview, coloured by actual vertex RGB/intensity |
+| `outputs/coverage1_finer_mesh/` | Earlier full coverage1 build (from the `coverage1_lipede` bag, before floor filtering, carving and the marching-cubes fixes), with its `build.log` and `mesh_screenshot.png` |
+| `cache/<name>/frames/*.jpg`, `cache/<name>/timestamps.npy` | Cached camera frames (pass 1 output, reused across runs) |
+| `make_preview.py` | Regenerates `outputs/<name>/preview.png` (or `preview_refined.png`) from that bag's mesh |
+| `refine_mesh.py` | Mesh post-processing: clip, small pieces, smoothing, floor flattening, hole filling, decimation |
+| `src/floor.py` | Floor model: candidate selection, RANSAC + SVD plane fit, per-cell correction |
+| `src/mesh_io.py` | VTK mesh conversion and PLY/OBJ/STL export shared by both scripts |
 | `src/trajectory.py` | GLIM trajectory loading and pose interpolation |
 | `src/extrinsics.py` | Sensor calibration loading (`config_sensors.json` -> matrices) |
 | `src/ouster_scan.py` | Raw Ouster scan parsing, edge filtering, organized-cloud normals |
 | `src/colorizer.py` | Camera frame caching and RGB/intensity point colourisation |
-| `src/tsdf_volume.py` | The TSDF grid: integration and marching-cubes mesh extraction |
+| `src/tsdf_volume.py` | The TSDF grid: integration, free-space carving and marching-cubes mesh extraction |
 | `src/bagio.py` | Small rosbag2 reading helpers |
 | `build_finer_map.py` | Driver script tying the above together |
 
@@ -301,7 +459,7 @@ MeshLab for an actual look at surface quality.
 - **Not watertight**, same as `coverage1_edited`: this reconstructs a scanned
   scene surface, not a solid. Boundaries exist wherever the sensor never saw
   the far side of something.
-- **Occlusion handling only within a single scan's own points** (see step 4
+- **Occlusion handling only within a single scan's own points** (see step 5
   above) — colour can very occasionally leak between a foreground and
   background surface that a *different* scan, not the one being coloured,
   observed at that pixel.
@@ -312,6 +470,15 @@ MeshLab for an actual look at surface quality.
   voxels; pushing well past that resolution or covering a much larger space
   would need an octree/hashed TSDF (e.g. a proper OpenVDB-backed tool) to
   stay memory-tractable — see `--voxel-size` above.
+- **One floor level**: the floor model assumes a single, roughly planar floor
+  (per-cell corrections are clamped to +/-8 cm). Stairs, ramps or a
+  multi-level map would need a different floor model.
+- **Carving only removes what it has already seen**: it only acts on voxels
+  observed before the ray passes through them, so something that appears
+  only at the very end of the bag and is never seen through again stays.
+  Carving is also kept out of the 10 cm above the floor, so a ghost standing
+  on the floor (e.g. feet) can leave a low remnant; `--min-component` in
+  `refine_mesh.py` usually removes such pieces.
 - **Camera FOV is narrower than the LiDAR's**, so a large fraction of the
   mesh is coloured from LiDAR intensity, not RGB — check
   `finer_map_report.json`'s `points_coloured_from_rgb_pct` for the actual

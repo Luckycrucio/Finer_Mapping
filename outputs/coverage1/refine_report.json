@@ -1,0 +1,47 @@
+{
+  "input": "/home/autosweep/finer_mapping/outputs/coverage1/coverage1_finer_mesh.ply",
+  "input_triangles": 3430111,
+  "floor_model": {
+    "normal": [
+      -0.004606,
+      -0.034252,
+      0.999403
+    ],
+    "offset_m": 0.509004,
+    "tilt_from_world_z_deg": 1.981,
+    "cell_size_m": 1.0,
+    "grid_shape": [
+      24,
+      23
+    ],
+    "cell_correction_range_m": [
+      -0.0312,
+      0.0717
+    ]
+  },
+  "clipped_triangles": 2379,
+  "removed_components": 21673,
+  "removed_component_triangles": 169208,
+  "flattened_vertices": 297507,
+  "hole_fill_triangles": 89960,
+  "decimation_stray_vertices": 0,
+  "output_vertices": 911227,
+  "output_triangles": 1674242,
+  "params": {
+    "name": "coverage1",
+    "input": "/home/autosweep/finer_mapping/outputs/coverage1/coverage1_finer_mesh.ply",
+    "floor_model": "/home/autosweep/finer_mapping/outputs/coverage1/floor_model.npz",
+    "map_dir": "/home/autosweep/autosweep/glim_maps/coverage1",
+    "maps_root": "/home/autosweep/autosweep/glim_maps",
+    "out_dir": "/home/autosweep/finer_mapping/outputs/coverage1",
+    "clip_margin": 0.05,
+    "ceiling_height": null,
+    "min_component": 500,
+    "smooth_iterations": 15,
+    "smooth_passband": 0.1,
+    "flatten_tolerance": 0.03,
+    "flatten_max_angle": 25.0,
+    "fill_holes": 0.3,
+    "decimate": 0.5
+  }
+}

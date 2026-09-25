@@ -17,6 +17,18 @@ convention, generalised to an arbitrary ray direction per point instead of a
 shared camera ray grid. Voxels are combined across scans with a running
 weighted average, the same rule projective TSDF fusion uses.
 
+`carve` adds the other half of what a real sensor ray tells you: every voxel
+it passed through *before* reaching the band around its endpoint was empty at
+that moment. Without it, only the +/- truncation band is ever updated, so a
+person walking through the room is fused as a permanent ghost surface --
+nothing later ever contradicts it. Carving pushes already-observed voxels a
+ray has since flown through towards "free" (+truncation) with a small weight
+per scan, so a surface seen a handful of times and then repeatedly seen
+*through* fades, while static geometry (observed thousands of times) barely
+moves. Carving never creates observations in voxels that had none, and can be
+kept away from the floor, where near-grazing rays would otherwise slowly erode
+it.
+
 This is a plain dense NumPy grid (no octree/hashing), which is only tractable
 because the scene is a single room-scale indoor map -- see the README for the
 memory-vs-voxel-size trade-off.
@@ -97,8 +109,48 @@ class TSDFVolume:
         for c in range(3):
             self.wcolor[uniq, c] += np.bincount(inv, weights=w_rep * colors_rep[:, c], minlength=len(uniq))
 
+    def carve(self, points, origins, carve_weight, keep_voxel=None):
+        """Free-space update along the rays origins -> points, stopping one
+        truncation distance plus one voxel short of each endpoint (so the
+        surface band itself is left to `integrate`). Every already-observed
+        voxel crossed by at least one ray gets one free-space observation
+        (sdf = +truncation, weight `carve_weight`) per call; each voxel's
+        colour average is preserved. `keep_voxel`, if given, maps (M,3) voxel
+        centres to a boolean mask of voxels allowed to be carved."""
+        if len(points) == 0:
+            return 0
+        directions = points - origins
+        ranges = np.linalg.norm(directions, axis=1)
+        stop = ranges - (self.truncation_distance + self.voxel_size)
+        ok = stop > self.voxel_size
+        if not np.any(ok):
+            return 0
+        origins, directions, ranges, stop = origins[ok], directions[ok], ranges[ok], stop[ok]
+        directions = directions / ranges[:, None]
+
+        steps = np.arange(1, int(np.ceil(stop.max() / self.voxel_size)) + 1) * self.voxel_size
+        along = steps[None, :] < stop[:, None]
+        ray_i, step_i = np.nonzero(along)
+        samples = origins[ray_i] + directions[ray_i] * steps[step_i, None]
+
+        idx = self._voxel_index(samples)
+        in_bounds = np.all((idx >= 0) & (idx < self.dims), axis=1)
+        linear = np.unique(idx[in_bounds] @ self._strides)
+        linear = linear[self.weight[linear] > 0]
+        if keep_voxel is not None and len(linear):
+            vox = np.stack(np.unravel_index(linear, self.dims), axis=1)
+            linear = linear[keep_voxel(self.origin + (vox + 0.5) * self.voxel_size)]
+        if len(linear) == 0:
+            return 0
+
+        w_old = self.weight[linear]
+        w_new = w_old + carve_weight
+        self.wcolor[linear] *= (w_new / w_old)[:, None]
+        self.weight[linear] = w_new
+        self.wsdf[linear] += carve_weight * self.truncation_distance
+        return len(linear)
+
     def extract_mesh(self, min_weight=1.0):
-        from scipy.ndimage import binary_dilation
         from skimage.measure import marching_cubes
 
         weight = self.weight.reshape(self.dims)
@@ -108,9 +160,22 @@ class TSDFVolume:
         observed = weight > min_weight
         if not np.any(observed):
             raise RuntimeError("no voxels reached the requested minimum weight -- lower --min-weight")
-        # give marching cubes a 1-voxel margin so cubes straddling the edge of
-        # the observed region still get evaluated
-        mask = binary_dilation(observed, iterations=1)
+        # Only evaluate cubes whose 8 corners are all observed. Unobserved
+        # voxels hold a +truncation placeholder, so a cube straddling the edge
+        # of the observed region would compare real (often negative, behind-
+        # surface) values against it and produce a fake zero crossing: a
+        # phantom surface at the back of the truncation band (e.g. a second
+        # floor ~7 cm under the real one) and "curtains" along every
+        # observation boundary. skimage tests `mask` at a cube's *upper*
+        # corner (the cube spanning [i-1, i] on each axis is kept if mask[i]),
+        # checked empirically against skimage 0.26.
+        all_corners = observed[1:, 1:, 1:].copy()
+        for dx, dy, dz in [(1, 0, 0), (0, 1, 0), (0, 0, 1), (1, 1, 0), (1, 0, 1), (0, 1, 1), (1, 1, 1)]:
+            all_corners &= observed[1 - dx:observed.shape[0] - dx,
+                                    1 - dy:observed.shape[1] - dy,
+                                    1 - dz:observed.shape[2] - dz]
+        mask = np.zeros_like(observed)
+        mask[1:, 1:, 1:] = all_corners
 
         tsdf = np.where(observed, wsdf / np.maximum(weight, 1e-6), self.truncation_distance)
         color = np.zeros_like(wcolor)
@@ -119,9 +184,13 @@ class TSDFVolume:
         verts, faces, _normals, _values = marching_cubes(
             tsdf, level=0.0, spacing=(self.voxel_size,) * 3, mask=mask
         )
-        verts_world = verts + self.origin
+        # marching cubes places grid sample i at i * voxel_size, but sample i
+        # holds voxel i's *centre* (origin + (i + 0.5) * voxel_size, the same
+        # convention `integrate` uses), hence the half-voxel shift
+        verts_world = verts + self.origin + 0.5 * self.voxel_size
 
-        vidx = np.floor((verts_world - self.origin) / self.voxel_size).astype(np.int64)
+        # colour from the nearest voxel centre (a vertex lies on the edge between two)
+        vidx = np.rint(verts / self.voxel_size).astype(np.int64)
         vidx = np.clip(vidx, 0, self.dims - 1)
         vertex_colors = color[vidx[:, 0], vidx[:, 1], vidx[:, 2]]
 

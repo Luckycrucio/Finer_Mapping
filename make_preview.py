@@ -16,9 +16,14 @@ import numpy as np
 import vtk
 from vtk.util import numpy_support
 
+args = [a for a in sys.argv[1:] if a != "--refined"]
+refined = "--refined" in sys.argv[1:]
+if len(args) != 1:
+    sys.exit(f"usage: {sys.argv[0]} <bag_name> [--refined]   (e.g. coverage1)")
+name = args[0]
 here = Path(__file__).resolve().parent
-ply_path = here / "outputs" / "coverage1_finer_mesh.ply"
-out_path = here / "outputs" / "preview.png"
+ply_path = here / "outputs" / name / f"{name}_{'refined' if refined else 'finer'}_mesh.ply"
+out_path = here / "outputs" / name / ("preview_refined.png" if refined else "preview.png")
 
 reader = vtk.vtkPLYReader()
 reader.SetFileName(str(ply_path))
@@ -40,7 +45,7 @@ ax.scatter(pts[:, 0], pts[:, 1], pts[:, 2], c=cols, s=0.35, linewidths=0)
 ax.set_xlabel("X (m)")
 ax.set_ylabel("Y (m)")
 ax.set_zlabel("Z (m)")
-ax.set_title(f"coverage1 finer TSDF mesh -- {len(points):,} vertices ({n_sample:,} shown, RGB/intensity colour)")
+ax.set_title(f"{name} {'refined' if refined else 'finer TSDF'} mesh -- {len(points):,} vertices ({n_sample:,} shown, RGB/intensity colour)")
 ax.view_init(elev=55, azim=-65)
 
 ranges = pts.max(axis=0) - pts.min(axis=0)

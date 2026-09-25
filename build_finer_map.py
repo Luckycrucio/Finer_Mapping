@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
-"""Build a finer-detail, RGB-colourised mesh of coverage1 via TSDF fusion.
+"""Build a finer-detail, RGB-colourised mesh of a recorded bag via TSDF fusion.
+
+Usage: build_finer_map.py <bag_name>  (e.g. coverage1)
+
+<bag_name> selects both the raw rosbag2 directory
+<datasets-root>/<bag_name><bag-suffix> (the `_lipede` recording by default, e.g.
+dataset22jul/coverage1_lipede) and the GLIM map directory with its odometry
+<maps-root>/<bag_name> (e.g. glim_maps/coverage1). Outputs go to outputs/<bag_name>/ and the camera frame
+cache to cache/<bag_name>/.
 
 See README.md for the full pipeline explanation. Summary:
 
@@ -7,7 +15,10 @@ See README.md for the full pipeline explanation. Summary:
      it at any timestamp with `src.trajectory.Trajectory`.
   2. Cache every /rgb/image_raw frame from the source rosbag to disk once
      (`src.colorizer.cache_frames`).
-  3. Stream every raw /ouster/points scan from the bag (NOT the downsampled
+  3. Estimate the floor from every `--floor-sample-stride`-th scan: RANSAC
+     then SVD plane fit on horizontal surfaces near the sensor, plus a coarse
+     per-cell height correction (`src.floor`).
+  4. Stream every raw /ouster/points scan from the bag (NOT the downsampled
      points GLIM's own map already stored) and, per scan:
        - drop invalid returns and within-ring depth-discontinuity edge noise
          using the organized (ring, column) layout (`src.ouster_scan`),
@@ -15,15 +26,20 @@ See README.md for the full pipeline explanation. Summary:
          that point's own capture time (all 64 beams in an Ouster column fire
          simultaneously, so this is one interpolation per column, not per
          point),
+       - drop points more than `--floor-margin` below the local floor (LiDAR
+         reflections off the floor) and, optionally, above a ceiling height,
        - colourise each point from the nearest-in-time camera frame via
          projection with the calibrated extrinsics/distortion model, z-buffered
          per scan, falling back to intensity grayscale where RGB is
          unavailable (`src.colorizer`),
        - weight each point by how face-on it was seen (an incidence-angle
          estimate from organized-neighbour normals) and fuse it into a dense
-         TSDF volume (`src.tsdf_volume`).
-  4. Extract the zero level set with marching cubes, restricted to
-     actually-observed voxels, and export PLY/OBJ/STL plus a JSON report.
+         TSDF volume (`src.tsdf_volume`),
+       - carve free space along a subsample of the scan's rays, so things
+         that moved (people) fade out of the map instead of staying as ghosts.
+  5. Extract the zero level set with marching cubes, restricted to cubes
+     whose corners were all observed, and export PLY/OBJ/STL, the floor model
+     (floor_model.npz, reused by refine_mesh.py) and a JSON report.
 """
 import argparse
 import json
@@ -37,23 +53,37 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from src.bagio import iter_topic, open_bag  # noqa: E402
 from src.colorizer import FrameColorizer, cache_frames  # noqa: E402
 from src.extrinsics import SensorConfig  # noqa: E402
+from src.floor import FloorModel, estimate_floor, select_candidates  # noqa: E402
+from src.mesh_io import finish_and_write, polydata_from_arrays  # noqa: E402
 from src.ouster_scan import OrganizedScan  # noqa: E402
 from src.tsdf_volume import TSDFVolume  # noqa: E402
 from src.trajectory import Trajectory  # noqa: E402
 
 POINTS_TOPIC = "/ouster/points"
 IMAGE_TOPIC = "/rgb/image_raw"
+DATASETS_ROOT = "/home/autosweep/autosweep/dataset22jul"
+MAPS_ROOT = "/home/autosweep/autosweep/glim_maps"
+BAG_SUFFIX = "_lipede"
 
 
 def parse_args():
     here = Path(__file__).resolve().parent
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--bag", default="/home/autosweep/autosweep/dataset22jul/coverage1_lipede",
-                   help="source rosbag2 directory (must contain metadata.yaml)")
-    p.add_argument("--map-dir", default="/home/autosweep/autosweep/glim_maps/coverage1",
-                   help="GLIM map directory providing traj_lidar.txt and config/config_sensors.json")
-    p.add_argument("--out-dir", default=str(here / "outputs"))
-    p.add_argument("--cache-dir", default=str(here / "cache"))
+    p.add_argument("name", help="bag name: reads the rosbag2 <datasets-root>/<name><bag-suffix> and the "
+                                "GLIM map/odometry <maps-root>/<name>, e.g. coverage1")
+    p.add_argument("--datasets-root", default=DATASETS_ROOT, help="directory holding the rosbag2 directories")
+    p.add_argument("--maps-root", default=MAPS_ROOT, help="directory holding the GLIM map directories")
+    p.add_argument("--bag-suffix", default=BAG_SUFFIX,
+                   help="appended to <name> to get the rosbag2 directory name (default: %(default)s)")
+    p.add_argument("--bag", default=None,
+                   help="override the source rosbag2 directory (default: <datasets-root>/<name><bag-suffix>)")
+    p.add_argument("--map-dir", default=None,
+                   help="override the GLIM map directory providing traj_lidar.txt and "
+                        "config/config_sensors.json (default: <maps-root>/<name>)")
+    p.add_argument("--points-topic", default=POINTS_TOPIC, help="Ouster PointCloud2 topic (e.g. /ousterDome/points)")
+    p.add_argument("--image-topic", default=IMAGE_TOPIC, help="camera image topic")
+    p.add_argument("--out-dir", default=None, help="default: outputs/<name>")
+    p.add_argument("--cache-dir", default=None, help="default: cache/<name>")
     p.add_argument("--voxel-size", type=float, default=0.03, help="TSDF voxel edge length, metres")
     p.add_argument("--truncation", type=float, default=None,
                    help="TSDF truncation distance, metres (default: 4 * voxel-size)")
@@ -74,23 +104,54 @@ def parse_args():
                    help="max seconds between a scan column and the camera frame used to colour it")
     p.add_argument("--min-weight", type=float, default=1.5,
                    help="minimum accumulated TSDF weight for a voxel to be considered observed")
+    p.add_argument("--no-floor-filter", action="store_true",
+                   help="skip floor estimation and keep below-floor points (also disables the "
+                        "floor clearance used by carving)")
+    p.add_argument("--floor-model", default=None,
+                   help="load a floor_model.npz from an earlier run instead of estimating it again")
+    p.add_argument("--floor-margin", type=float, default=0.05,
+                   help="drop points more than this many metres below the local floor")
+    p.add_argument("--ceiling-height", type=float, default=None,
+                   help="drop points more than this many metres above the floor (default: keep all)")
+    p.add_argument("--floor-cell-size", type=float, default=1.0,
+                   help="cell size, metres, of the floor model's per-cell height correction")
+    p.add_argument("--floor-sample-stride", type=int, default=10,
+                   help="use every N-th scan to estimate the floor")
+    p.add_argument("--carve-ray-stride", type=int, default=8,
+                   help="free-space carving uses one ray in N per scan (0 disables carving)")
+    p.add_argument("--carve-weight", type=float, default=0.2,
+                   help="weight of one free-space observation per voxel per scan")
+    p.add_argument("--carve-floor-clearance", type=float, default=0.10,
+                   help="never carve voxels within this many metres of the floor (avoids eroding "
+                        "the floor with near-grazing rays)")
     p.add_argument("--limit-scans", type=int, default=None, help="debug: only process the first N scans")
     p.add_argument("--skip-frame-cache", action="store_true", help="reuse an existing frame cache as-is")
-    return p.parse_args()
+    args = p.parse_args()
+    args.bag = args.bag or str(Path(args.datasets_root) / f"{args.name}{args.bag_suffix}")
+    args.map_dir = args.map_dir or str(Path(args.maps_root) / args.name)
+    args.out_dir = args.out_dir or str(here / "outputs" / args.name)
+    args.cache_dir = args.cache_dir or str(here / "cache" / args.name)
+
+    missing = [f for f in (Path(args.bag) / "metadata.yaml",
+                           Path(args.map_dir) / "traj_lidar.txt",
+                           Path(args.map_dir) / "config" / "config_sensors.json") if not f.is_file()]
+    if missing:
+        p.error("missing input file(s) for '%s':\n  %s" % (args.name, "\n  ".join(map(str, missing))))
+    return args
 
 
 def log(msg):
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
 
-def estimate_intensity_range(bag_path, stride=8, sample_cap=2_000_000):
+def estimate_intensity_range(bag_path, points_topic, stride=8, sample_cap=2_000_000):
     """Cheap single pass over every `stride`-th scan's intensity field only,
     to fix a global percentile-normalised grayscale range up front (matches
     the fixed global range used by the earlier color_intensity.py pipeline,
     rather than a per-scan range that would flicker frame to frame)."""
     samples = []
     total = 0
-    for i, msg in enumerate(iter_topic(bag_path, POINTS_TOPIC)):
+    for i, msg in enumerate(iter_topic(bag_path, points_topic)):
         if i % stride != 0:
             continue
         from sensor_msgs_py import point_cloud2
@@ -130,59 +191,60 @@ def main():
     if args.skip_frame_cache and stamps_path.exists():
         log("reusing existing frame cache")
     else:
-        log("pass 1/3: caching camera frames from the bag...")
-        cache_frames(lambda: open_bag(args.bag), IMAGE_TOPIC, cache_dir, log=log)
+        log("pass 1/4: caching camera frames from the bag...")
+        cache_frames(lambda: open_bag(args.bag), args.image_topic, cache_dir, log=log)
 
-    log("pass 2/3: estimating a global intensity normalisation range...")
-    lo, hi = estimate_intensity_range(args.bag)
+    log("pass 2/4: estimating a global intensity normalisation range...")
+    lo, hi = estimate_intensity_range(args.bag, args.points_topic)
 
     colorizer = FrameColorizer(cache_dir, sensors, max_dt=args.max_image_dt)
     colorizer.set_intensity_range(lo, hi)
 
-    log("pass 3/3: streaming scans, deskewing, colourising and fusing into the TSDF...")
+    floor = None
+    if args.floor_model:
+        floor = FloorModel.load(args.floor_model)
+        log(f"loaded floor model from {args.floor_model}: {floor.summary()}")
+    elif not args.no_floor_filter:
+        log("pass 3/4: estimating the floor...")
+        floor = estimate_floor_from_bag(args, trajectory)
+    if floor is not None:
+        floor.save(out_dir / "floor_model.npz")
+
+    carve_keep = None
+    if floor is not None and args.carve_floor_clearance > 0:
+        carve_keep = lambda centres: floor.height_above_floor(centres) > args.carve_floor_clearance  # noqa: E731
+
+    log("pass 4/4: streaming scans, deskewing, colourising and fusing into the TSDF...")
+    rng = np.random.default_rng(0)
     n_scans = 0
     n_points_total = 0
     n_points_rgb = 0
+    n_points_floor_dropped = 0
+    n_voxels_carved = 0
     t_start = time.time()
 
-    for msg in iter_topic(args.bag, POINTS_TOPIC):
+    for msg in iter_topic(args.bag, args.points_topic):
         if args.limit_scans is not None and n_scans >= args.limit_scans:
             break
 
-        scan = OrganizedScan(msg)
-        keep = scan.edge_filter(jump_m=args.edge_jump)
-        min_range_per_ring = np.where(
-            np.arange(scan.rows) >= scan.rows - args.bottom_rings,
-            args.bottom_ring_min_range, args.min_range,
-        )
-        keep &= (scan.range_m >= min_range_per_ring[:, None]) & (scan.range_m <= args.max_range)
-
-        col_times = scan.column_times_s()
-        col_in_range = trajectory.in_range(col_times)
-        keep &= col_in_range[None, :]
-        if not np.any(keep):
+        prep = prepare_scan(OrganizedScan(msg), trajectory, args)
+        if prep is not None and floor is not None:
+            height = floor.height_above_floor(prep.points_world)
+            keep = height >= -args.floor_margin
+            if args.ceiling_height is not None:
+                keep &= height <= args.ceiling_height
+            n_points_floor_dropped += int((~keep).sum())
+            prep = prep.subset(keep)
+        if prep is None or len(prep.points_world) == 0:
             n_scans += 1
             continue
 
-        # one pose per column (all beams in a column share a timestamp)
-        col_T_world_lidar = trajectory.matrices(col_times)  # (cols, 4, 4)
-        col_frame_idx = colorizer.nearest_frame_index(col_times)  # (cols,)
+        points_world, origins_world, intensity = prep.points_world, prep.origins_world, prep.intensity
+        cols = prep.cols
+        col_frame_idx = colorizer.nearest_frame_index(prep.col_times)  # (cols,)
 
-        rows, cols = np.nonzero(keep)
-        xyz_local = scan.xyz[rows, cols]
-        intensity = scan.intensity[rows, cols]
-
-        R = col_T_world_lidar[cols, :3, :3]
-        t = col_T_world_lidar[cols, :3, 3]
-        points_world = np.einsum("nij,nj->ni", R, xyz_local) + t
-        origins_world = t  # sensor position at each point's own capture time
-
-        normals, normals_valid = scan.organized_normals()
-        n_sel = normals[rows, cols]
-        nv_sel = normals_valid[rows, cols]
-        ray_dir = xyz_local / np.linalg.norm(xyz_local, axis=1, keepdims=True)
-        incidence = np.abs(np.einsum("ij,ij->i", n_sel, -ray_dir))
-        weights = np.where(nv_sel, np.clip(incidence, 0.2, 1.0), 0.5).astype(np.float32)
+        incidence = np.abs(np.einsum("ij,ij->i", prep.normals_local, -prep.ray_dir_local))
+        weights = np.where(prep.normals_valid, np.clip(incidence, 0.2, 1.0), 0.5).astype(np.float32)
 
         colors = np.empty((len(points_world), 3), dtype=np.float32)
         point_frame_idx = col_frame_idx[cols]
@@ -199,6 +261,10 @@ def main():
             n_points_rgb += int(used_rgb.sum())
 
         volume.integrate(points_world, origins_world, colors, weights)
+        if args.carve_ray_stride > 0:
+            rays = rng.random(len(points_world)) < 1.0 / args.carve_ray_stride
+            n_voxels_carved += volume.carve(points_world[rays], origins_world[rays], args.carve_weight,
+                                            keep_voxel=carve_keep)
 
         n_scans += 1
         n_points_total += len(points_world)
@@ -208,15 +274,19 @@ def main():
                 f"({elapsed:.0f}s, {n_scans / elapsed:.1f} scans/s)")
 
     log(f"fusion done: {n_scans} scans, {n_points_total:,} points "
-        f"({100.0 * n_points_rgb / max(n_points_total, 1):.1f}% coloured from RGB)")
+        f"({100.0 * n_points_rgb / max(n_points_total, 1):.1f}% coloured from RGB), "
+        f"{n_points_floor_dropped:,} dropped below the floor/above the ceiling, "
+        f"{n_voxels_carved:,} free-space voxel updates")
 
     log("extracting mesh from the TSDF...")
     verts, faces, vertex_colors, stats = volume.extract_mesh(min_weight=args.min_weight)
     log(f"raw marching-cubes mesh: {len(verts):,} vertices, {len(faces):,} triangles")
 
-    export_mesh(out_dir, verts, faces, vertex_colors)
+    colors_u8 = np.clip(vertex_colors, 0, 255).astype(np.uint8)[:, ::-1]  # BGR -> RGB
+    finish_and_write(polydata_from_arrays(verts, faces, colors_u8), out_dir, f"{args.name}_finer_mesh")
 
     report = {
+        "name": args.name,
         "bag": str(args.bag),
         "map_dir": str(args.map_dir),
         "voxel_size_m": args.voxel_size,
@@ -229,6 +299,15 @@ def main():
         "padding_m": args.padding,
         "max_image_dt_s": args.max_image_dt,
         "min_weight": args.min_weight,
+        "floor_filter": floor is not None,
+        "floor_margin_m": args.floor_margin,
+        "ceiling_height_m": args.ceiling_height,
+        "floor_model": floor.summary() if floor is not None else None,
+        "points_dropped_by_floor_ceiling": n_points_floor_dropped,
+        "carve_ray_stride": args.carve_ray_stride,
+        "carve_weight": args.carve_weight,
+        "carve_floor_clearance_m": args.carve_floor_clearance,
+        "free_space_voxel_updates": n_voxels_carved,
         "scans_processed": n_scans,
         "points_fused": n_points_total,
         "points_coloured_from_rgb_pct": 100.0 * n_points_rgb / max(n_points_total, 1),
@@ -242,53 +321,75 @@ def main():
     log(f"report -> {out_dir / 'finer_map_report.json'}")
 
 
-def export_mesh(out_dir, verts, faces, vertex_colors):
-    import vtk
-    from vtk.util import numpy_support
+class PreparedScan:
+    """One scan's filtered points, deskewed into the world frame."""
 
-    points = vtk.vtkPoints()
-    points.SetData(numpy_support.numpy_to_vtk(np.ascontiguousarray(verts, dtype=np.float64)))
+    def __init__(self, **fields):
+        self.__dict__.update(fields)
 
-    cells = vtk.vtkCellArray()
-    n_faces = len(faces)
-    cell_data = np.empty((n_faces, 4), dtype=np.int64)
-    cell_data[:, 0] = 3
-    cell_data[:, 1:] = faces
-    cells.SetCells(n_faces, numpy_support.numpy_to_vtkIdTypeArray(cell_data.reshape(-1)))
+    def subset(self, mask):
+        per_point = ["rows", "cols", "xyz_local", "intensity", "points_world", "origins_world",
+                     "R", "normals_local", "normals_valid", "ray_dir_local"]
+        fields = {k: (v[mask] if k in per_point else v) for k, v in self.__dict__.items()}
+        return PreparedScan(**fields)
 
-    colors_u8 = np.clip(vertex_colors, 0, 255).astype(np.uint8)[:, ::-1]  # BGR -> RGB
-    color_array = numpy_support.numpy_to_vtk(np.ascontiguousarray(colors_u8), array_type=vtk.VTK_UNSIGNED_CHAR)
-    color_array.SetName("RGB")
 
-    poly = vtk.vtkPolyData()
-    poly.SetPoints(points)
-    poly.SetPolys(cells)
-    poly.GetPointData().SetScalars(color_array)
+def prepare_scan(scan, trajectory, args):
+    """Range/edge/trajectory-coverage filtering and per-column deskewing
+    shared by the floor-estimation and fusion passes. None if nothing is left."""
+    keep = scan.edge_filter(jump_m=args.edge_jump)
+    min_range_per_ring = np.where(
+        np.arange(scan.rows) >= scan.rows - args.bottom_rings,
+        args.bottom_ring_min_range, args.min_range,
+    )
+    keep &= (scan.range_m >= min_range_per_ring[:, None]) & (scan.range_m <= args.max_range)
 
-    clean = vtk.vtkCleanPolyData()
-    clean.SetInputData(poly)
-    clean.Update()
-    cleaned = clean.GetOutput()
+    col_times = scan.column_times_s()
+    keep &= trajectory.in_range(col_times)[None, :]
+    if not np.any(keep):
+        return None
 
-    normals = vtk.vtkPolyDataNormals()
-    normals.SetInputData(cleaned)
-    normals.SplittingOff()
-    normals.ConsistencyOn()
-    normals.AutoOrientNormalsOn()
-    normals.Update()
-    final = normals.GetOutput()
+    # one pose per column (all beams in a column share a timestamp)
+    col_T_world_lidar = trajectory.matrices(col_times)  # (cols, 4, 4)
 
-    for ext, writer_cls in [("ply", vtk.vtkPLYWriter), ("obj", vtk.vtkOBJWriter), ("stl", vtk.vtkSTLWriter)]:
-        writer = writer_cls()
-        writer.SetFileName(str(out_dir / f"coverage1_finer_mesh.{ext}"))
-        writer.SetInputData(final)
-        if ext == "ply":
-            writer.SetArrayName("RGB")
-            writer.SetColorModeToDefault()
-            writer.SetFileTypeToBinary()
-        if ext == "stl":
-            writer.SetFileTypeToBinary()
-        writer.Write()
+    rows, cols = np.nonzero(keep)
+    xyz_local = scan.xyz[rows, cols]
+    R = col_T_world_lidar[cols, :3, :3]
+    t = col_T_world_lidar[cols, :3, 3]
+    normals, normals_valid = scan.organized_normals()
+    return PreparedScan(
+        col_times=col_times, rows=rows, cols=cols, xyz_local=xyz_local,
+        intensity=scan.intensity[rows, cols],
+        points_world=np.einsum("nij,nj->ni", R, xyz_local) + t,
+        origins_world=t,  # sensor position at each point's own capture time
+        R=R, normals_local=normals[rows, cols], normals_valid=normals_valid[rows, cols],
+        ray_dir_local=xyz_local / np.linalg.norm(xyz_local, axis=1, keepdims=True),
+    )
+
+
+def estimate_floor_from_bag(args, trajectory, per_scan_cap=4000):
+    rng = np.random.default_rng(0)
+    pts, dzs = [], []
+    for i, msg in enumerate(iter_topic(args.bag, args.points_topic)):
+        if args.limit_scans is not None and i >= args.limit_scans:
+            break
+        if i % args.floor_sample_stride != 0:
+            continue
+        prep = prepare_scan(OrganizedScan(msg), trajectory, args)
+        if prep is None:
+            continue
+        sensor_up = prep.R[:, :, 2]
+        normals_world = np.einsum("nij,nj->ni", prep.R, prep.normals_local)
+        mask, dz = select_candidates(prep.points_world, prep.origins_world, normals_world, sensor_up,
+                                     prep.normals_valid)
+        sel = np.flatnonzero(mask)
+        if len(sel) > per_scan_cap:
+            sel = rng.choice(sel, per_scan_cap, replace=False)
+        pts.append(prep.points_world[sel])
+        dzs.append(dz[sel])
+    up = trajectory.rotations.as_matrix()[:, :, 2].mean(axis=0)
+    return estimate_floor(np.concatenate(pts), np.concatenate(dzs), up,
+                          cell_size_m=args.floor_cell_size, log=log)
 
 
 if __name__ == "__main__":
