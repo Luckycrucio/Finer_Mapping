@@ -1,6 +1,6 @@
 # Finer-detail RGB mesh via TSDF fusion
 
-![Mesh preview in a 3D viewer](outputs/coverage1_finer_mesh/mesh_screenshot.png)
+![Mesh preview in a 3D viewer](outputs/coverage1_old/mesh_screenshot.png)
 
 This is a second, independent reconstruction of the same environment as
 [`../coverage1_edited/`](../coverage1_edited/), built to get past that
