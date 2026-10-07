@@ -28,6 +28,8 @@ See README.md for the full pipeline explanation. Summary:
          point),
        - drop points more than `--floor-margin` below the local floor (LiDAR
          reflections off the floor) and, optionally, above a ceiling height,
+       - classify floor points (within `--floor-band` of the floor, facing
+         up): they are not fused, only used to colour a synthetic floor,
        - colourise each point from the nearest-in-time camera frame via
          projection with the calibrated extrinsics/distortion model, z-buffered
          per scan, falling back to intensity grayscale where RGB is
@@ -35,11 +37,16 @@ See README.md for the full pipeline explanation. Summary:
        - weight each point by how face-on it was seen (an incidence-angle
          estimate from organized-neighbour normals) and fuse it into a dense
          TSDF volume (`src.tsdf_volume`),
-       - carve free space along a subsample of the scan's rays, so things
-         that moved (people) fade out of the map instead of staying as ghosts.
+       - carve free space along a subsample of the scan's rays (rays that
+         hit the floor right down to it), so things that moved (people) fade
+         out of the map instead of staying as ghosts.
   5. Extract the zero level set with marching cubes, restricted to cubes
-     whose corners were all observed, and export PLY/OBJ/STL, the floor model
-     (floor_model.npz, reused by refine_mesh.py) and a JSON report.
+     whose corners were all observed, add a synthetic floor over the map's
+     floor outline, lying exactly on the floor model and coloured from the
+     floor points (`src.floor_slab`), shift the result in z so the floor is
+     at z = 0 under the GLIM origin, and export them together as a single PLY, plus the
+     floor model (floor_model.npz, reused by refine_mesh.py) and a JSON
+     report.
 """
 import argparse
 import json
@@ -54,6 +61,7 @@ from src.bagio import iter_topic, open_bag  # noqa: E402
 from src.colorizer import FrameColorizer, cache_frames  # noqa: E402
 from src.extrinsics import SensorConfig  # noqa: E402
 from src.floor import FloorModel, estimate_floor, select_candidates  # noqa: E402
+from src.floor_slab import FloorColorGrid, build_slab  # noqa: E402
 from src.mesh_io import finish_and_write, polydata_from_arrays  # noqa: E402
 from src.ouster_scan import OrganizedScan  # noqa: E402
 from src.tsdf_volume import TSDFVolume  # noqa: E402
@@ -100,8 +108,14 @@ def parse_args():
                    help="within-ring range discontinuity, metres, above which a point is dropped as edge noise")
     p.add_argument("--padding", type=float, default=6.0,
                    help="metres of TSDF volume padding around the trajectory bounding box")
+    p.add_argument("--padding-below-floor", type=float, default=0.5,
+                   help="metres of TSDF volume padding below the lowest point of the floor model "
+                        "(replaces --padding on the bottom face; ignored without a floor model)")
     p.add_argument("--max-image-dt", type=float, default=0.09,
                    help="max seconds between a scan column and the camera frame used to colour it")
+    p.add_argument("--intensity-color-weight", type=float, default=0.02,
+                   help="colour-average weight of an intensity-grayscale sample relative to an RGB "
+                        "sample, so RGB dominates any voxel the camera saw (1.0 = equal weight)")
     p.add_argument("--min-weight", type=float, default=1.5,
                    help="minimum accumulated TSDF weight for a voxel to be considered observed")
     p.add_argument("--no-floor-filter", action="store_true",
@@ -111,6 +125,21 @@ def parse_args():
                    help="load a floor_model.npz from an earlier run instead of estimating it again")
     p.add_argument("--floor-margin", type=float, default=0.05,
                    help="drop points more than this many metres below the local floor")
+    p.add_argument("--floor-band", type=float, default=0.05,
+                   help="points at most this many metres above the local floor, with an upward normal "
+                        "(or none), are floor: not fused, only used to colour the synthetic floor")
+    p.add_argument("--floor-normal-angle", type=float, default=30.0,
+                   help="max angle, degrees, between a floor point's normal and the floor normal")
+    p.add_argument("--floor-slab-top", choices=["model", "highest", "plane"], default="model",
+                   help="synthetic floor: 'model' = a single surface exactly on the floor model (global "
+                        "plane + smooth per-cell correction; walls and objects meet it with no gap); "
+                        "'highest' / 'plane' = a closed flat slab parallel to the global plane, its top at "
+                        "the measured floor's highest point / on the global plane")
+    p.add_argument("--floor-slab-thickness", type=float, default=None,
+                   help="flat slab thickness, metres ('highest'/'plane' only; default: down to the lowest "
+                        "point of the measured floor minus --floor-margin)")
+    p.add_argument("--floor-fill-radius", type=float, default=0.15,
+                   help="close gaps up to this many metres in the observed floor before filling holes")
     p.add_argument("--ceiling-height", type=float, default=None,
                    help="drop points more than this many metres above the floor (default: keep all)")
     p.add_argument("--floor-cell-size", type=float, default=1.0,
@@ -121,9 +150,9 @@ def parse_args():
                    help="free-space carving uses one ray in N per scan (0 disables carving)")
     p.add_argument("--carve-weight", type=float, default=0.2,
                    help="weight of one free-space observation per voxel per scan")
-    p.add_argument("--carve-floor-clearance", type=float, default=0.10,
-                   help="never carve voxels within this many metres of the floor (avoids eroding "
-                        "the floor with near-grazing rays)")
+    p.add_argument("--carve-floor-clearance", type=float, default=0.0,
+                   help="never carve voxels within this many metres of the floor (default 0: the floor "
+                        "is not fused, so carving cannot erode it)")
     p.add_argument("--limit-scans", type=int, default=None, help="debug: only process the first N scans")
     p.add_argument("--skip-frame-cache", action="store_true", help="reuse an existing frame cache as-is")
     args = p.parse_args()
@@ -182,11 +211,6 @@ def main():
     trajectory = Trajectory(map_dir / "traj_lidar.txt")
     log(f"trajectory: {len(trajectory.times)} poses, t in [{trajectory.t_min:.2f}, {trajectory.t_max:.2f}]")
 
-    bounds_min, bounds_max = trajectory.bounds(padding=args.padding)
-    log(f"TSDF bounds: min={bounds_min}, max={bounds_max}, voxel={args.voxel_size} m, trunc={truncation} m")
-    volume = TSDFVolume(bounds_min, bounds_max, args.voxel_size, truncation)
-    log(f"TSDF grid dims: {volume.dims.tolist()} ({int(np.prod(volume.dims)):,} voxels)")
-
     stamps_path = cache_dir / "timestamps.npy"
     if args.skip_frame_cache and stamps_path.exists():
         log("reusing existing frame cache")
@@ -210,16 +234,29 @@ def main():
     if floor is not None:
         floor.save(out_dir / "floor_model.npz")
 
+    bounds_min, bounds_max = trajectory.bounds(padding=args.padding)
+    if floor is not None:
+        # nothing is ever observed below the floor, so only pad a little under it
+        # instead of the full --padding (which roughly doubled the grid's height)
+        bounds_min[2] = floor.lowest_z(bounds_min[:2], bounds_max[:2]) - args.padding_below_floor
+    log(f"TSDF bounds: min={bounds_min}, max={bounds_max}, voxel={args.voxel_size} m, trunc={truncation} m")
+    volume = TSDFVolume(bounds_min, bounds_max, args.voxel_size, truncation)
+    log(f"TSDF grid dims: {volume.dims.tolist()} ({int(np.prod(volume.dims)):,} voxels)")
+    floor_grid = FloorColorGrid(volume.origin[:2], args.voxel_size, volume.dims[:2]) if floor is not None else None
+    cos_floor = np.cos(np.radians(args.floor_normal_angle))
+
     carve_keep = None
     if floor is not None and args.carve_floor_clearance > 0:
         carve_keep = lambda centres: floor.height_above_floor(centres) > args.carve_floor_clearance  # noqa: E731
 
     log("pass 4/4: streaming scans, deskewing, colourising and fusing into the TSDF...")
     rng = np.random.default_rng(0)
-    n_scans = 0
+    n_scans = 0  # scans read from the bag (what --limit-scans counts)
+    n_scans_fused = 0  # scans that contributed at least one point
     n_points_total = 0
     n_points_rgb = 0
     n_points_floor_dropped = 0
+    n_points_floor = 0
     n_voxels_carved = 0
     t_start = time.time()
 
@@ -235,6 +272,7 @@ def main():
                 keep &= height <= args.ceiling_height
             n_points_floor_dropped += int((~keep).sum())
             prep = prep.subset(keep)
+            height = height[keep]
         if prep is None or len(prep.points_world) == 0:
             n_scans += 1
             continue
@@ -247,6 +285,7 @@ def main():
         weights = np.where(prep.normals_valid, np.clip(incidence, 0.2, 1.0), 0.5).astype(np.float32)
 
         colors = np.empty((len(points_world), 3), dtype=np.float32)
+        point_rgb = np.zeros(len(points_world), dtype=bool)
         point_frame_idx = col_frame_idx[cols]
         for fid in np.unique(point_frame_idx):
             sel = point_frame_idx == fid
@@ -258,23 +297,41 @@ def main():
                 points_world[sel], world_from_camera, fid, intensity[sel]
             )
             colors[sel] = frame_colors
+            point_rgb[sel] = used_rgb
             n_points_rgb += int(used_rgb.sum())
 
-        volume.integrate(points_world, origins_world, colors, weights)
+        color_weights = weights * np.where(point_rgb, 1.0, args.intensity_color_weight).astype(np.float32)
+
+        # floor points only colour the synthetic slab; everything else is fused
+        is_floor = np.zeros(len(points_world), dtype=bool)
+        if floor_grid is not None:
+            normals_world = np.einsum("nij,nj->ni", prep.R, prep.normals_local)
+            facing_up = np.abs(normals_world @ floor.normal) >= cos_floor
+            is_floor = (height <= args.floor_band) & (facing_up | ~prep.normals_valid)
+            floor_grid.add(points_world[is_floor], colors[is_floor], color_weights[is_floor])
+        fuse = ~is_floor
+        volume.integrate(points_world[fuse], origins_world[fuse], colors[fuse], weights[fuse], color_weights[fuse])
         if args.carve_ray_stride > 0:
             rays = rng.random(len(points_world)) < 1.0 / args.carve_ray_stride
+            # a ray that ended on the (unfused) floor carves right down to it
+            margin = np.where(is_floor[rays], args.voxel_size, truncation + args.voxel_size)
             n_voxels_carved += volume.carve(points_world[rays], origins_world[rays], args.carve_weight,
-                                            keep_voxel=carve_keep)
+                                            keep_voxel=carve_keep, stop_margin=margin)
 
         n_scans += 1
-        n_points_total += len(points_world)
+        n_scans_fused += 1
+        n_points_total += int(fuse.sum())
+        n_points_floor += int(is_floor.sum())
         if n_scans % 200 == 0:
             elapsed = time.time() - t_start
-            log(f"  {n_scans} scans, {n_points_total:,} points fused "
+            log(f"  {n_scans} scans read, {n_points_total:,} points fused "
                 f"({elapsed:.0f}s, {n_scans / elapsed:.1f} scans/s)")
 
-    log(f"fusion done: {n_scans} scans, {n_points_total:,} points "
-        f"({100.0 * n_points_rgb / max(n_points_total, 1):.1f}% coloured from RGB), "
+    log(f"fusion done: {n_scans_fused} of {n_scans} scans fused "
+        f"({n_scans - n_scans_fused} skipped: outside the trajectory or nothing left after filtering), "
+        f"{n_points_total:,} points "
+        f"+ {n_points_floor:,} floor points "
+        f"({100.0 * n_points_rgb / max(n_points_total + n_points_floor, 1):.1f}% coloured from RGB), "
         f"{n_points_floor_dropped:,} dropped below the floor/above the ceiling, "
         f"{n_voxels_carved:,} free-space voxel updates")
 
@@ -282,8 +339,49 @@ def main():
     verts, faces, vertex_colors, stats = volume.extract_mesh(min_weight=args.min_weight)
     log(f"raw marching-cubes mesh: {len(verts):,} vertices, {len(faces):,} triangles")
 
+    slab_report = None
+    if floor_grid is not None:
+        mask = floor_grid.outline(args.floor_fill_radius)
+        if args.floor_slab_top == "model":
+            top_z, bottom_z, thickness = floor.floor_z, None, 0.0
+        else:
+            top_h = float(floor.grid.max()) if args.floor_slab_top == "highest" else 0.0
+            if args.floor_slab_thickness is not None:
+                bottom_h = top_h - args.floor_slab_thickness
+            else:
+                bottom_h = min(float(floor.grid.min()), 0.0) - args.floor_margin
+            top_z = lambda xy: floor.plane_z(xy, top_h)  # noqa: E731
+            bottom_z = lambda xy: floor.plane_z(xy, bottom_h)  # noqa: E731
+            thickness = top_h - bottom_h
+        s_verts, s_faces, s_colors = build_slab(mask, floor_grid.colors(), floor_grid.origin, args.voxel_size,
+                                                top_z, bottom_z)
+        slab_report = {
+            "top": args.floor_slab_top,
+            "thickness_m": round(thickness, 4),
+            "area_m2": round(float(mask.sum()) * args.voxel_size ** 2, 2),
+            "observed_floor_pct_of_area": round(
+                100.0 * float(((floor_grid.weight > 0).reshape(mask.shape) & mask).sum()) / max(mask.sum(), 1), 1),
+            "vertices": int(len(s_verts)),
+            "triangles": int(len(s_faces)),
+        }
+        log(f"floor slab: {slab_report}")
+        s_colors_u8 = np.clip(s_colors, 0, 255).astype(np.uint8)[:, ::-1]
+
     colors_u8 = np.clip(vertex_colors, 0, 255).astype(np.uint8)[:, ::-1]  # BGR -> RGB
-    finish_and_write(polydata_from_arrays(verts, faces, colors_u8), out_dir, f"{args.name}_finer_mesh")
+    z_offset = 0.0
+    if slab_report is not None:
+        faces = np.concatenate([faces, s_faces + len(verts)])
+        verts = np.concatenate([verts, s_verts])
+        colors_u8 = np.concatenate([colors_u8, s_colors_u8])
+        # shift the output along z only, so the floor's top surface is at
+        # z = 0 under the GLIM origin (the floor stays tilted like in GLIM's frame)
+        z_offset = -float(top_z(np.zeros((1, 2)))[0])
+        verts = verts + np.array([0.0, 0.0, z_offset])
+        log(f"output frame: z shifted by {z_offset:+.4f} m (slab top at z = 0 under the GLIM origin)")
+    # the only mesh output: fused objects + floor slab (refine_mesh.py separates
+    # the slab again by itself, see src.floor_slab.find_slab)
+    finish_and_write(polydata_from_arrays(verts, faces, colors_u8), out_dir, f"{args.name}_finer_mesh",
+                     formats=("ply",))
 
     report = {
         "name": args.name,
@@ -297,20 +395,32 @@ def main():
         "bottom_ring_min_range_m": args.bottom_ring_min_range,
         "edge_jump_m": args.edge_jump,
         "padding_m": args.padding,
+        "padding_below_floor_m": args.padding_below_floor if floor is not None else None,
+        "tsdf_bounds_min": [round(float(v), 4) for v in volume.origin],
         "max_image_dt_s": args.max_image_dt,
+        "intensity_color_weight": args.intensity_color_weight,
         "min_weight": args.min_weight,
         "floor_filter": floor is not None,
         "floor_margin_m": args.floor_margin,
         "ceiling_height_m": args.ceiling_height,
+        "floor_band_m": args.floor_band,
+        "floor_normal_angle_deg": args.floor_normal_angle,
+        "floor_fill_radius_m": args.floor_fill_radius,
+        "floor_slab": slab_report,
+        # added to every output z; everything else in this report (bounds,
+        # floor model) is in GLIM's frame
+        "output_z_offset_m": round(z_offset, 6),
         "floor_model": floor.summary() if floor is not None else None,
         "points_dropped_by_floor_ceiling": n_points_floor_dropped,
+        "points_floor_not_fused": n_points_floor,
         "carve_ray_stride": args.carve_ray_stride,
         "carve_weight": args.carve_weight,
         "carve_floor_clearance_m": args.carve_floor_clearance,
         "free_space_voxel_updates": n_voxels_carved,
-        "scans_processed": n_scans,
+        "scans_read": n_scans,
+        "scans_fused": n_scans_fused,
         "points_fused": n_points_total,
-        "points_coloured_from_rgb_pct": 100.0 * n_points_rgb / max(n_points_total, 1),
+        "points_coloured_from_rgb_pct": 100.0 * n_points_rgb / max(n_points_total + n_points_floor, 1),
         "intensity_normalisation_range": [lo, hi],
         "vertices": int(len(verts)),
         "triangles": int(len(faces)),

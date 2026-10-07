@@ -40,7 +40,10 @@ class TSDFVolume:
     def __init__(self, bounds_min, bounds_max, voxel_size, truncation_distance):
         self.voxel_size = float(voxel_size)
         self.truncation_distance = float(truncation_distance)
-        self.origin = np.asarray(bounds_min, dtype=np.float64)
+        # snap the origin to a multiple of the voxel size, so voxels sit at the
+        # same world positions whatever the bounds/padding (otherwise a padding
+        # change shifts the whole grid by a fraction of a voxel)
+        self.origin = np.floor(np.asarray(bounds_min, dtype=np.float64) / self.voxel_size) * self.voxel_size
 
         dims = np.ceil((np.asarray(bounds_max, dtype=np.float64) - self.origin) / self.voxel_size).astype(np.int64)
         self.dims = np.maximum(dims, 1) + 1  # (nx, ny, nz)
@@ -51,6 +54,9 @@ class TSDFVolume:
 
         self.weight = np.zeros(n, dtype=np.float32)
         self.wsdf = np.zeros(n, dtype=np.float32)
+        # colour has its own weight sum, so RGB and intensity samples can be
+        # weighted differently from the geometry (and carving never touches it)
+        self.cweight = np.zeros(n, dtype=np.float32)
         self.wcolor = np.zeros((n, 3), dtype=np.float32)
 
         n_samples = max(3, int(round(2 * truncation_distance / voxel_size)) + 1)
@@ -59,10 +65,14 @@ class TSDFVolume:
     def _voxel_index(self, world_xyz):
         return np.floor((world_xyz - self.origin) / self.voxel_size).astype(np.int64)
 
-    def integrate(self, points, origins, colors, weights):
+    def integrate(self, points, origins, colors, weights, color_weights=None):
         """points, origins, colors: (N,3) world-frame arrays; weights: (N,).
         `origins` is the sensor position each point was measured from (per
-        point, since a scan is deskewed against a moving trajectory)."""
+        point, since a scan is deskewed against a moving trajectory).
+        `color_weights` (N,), default `weights`, weights each point's colour in
+        the voxel colour average independently of its geometric weight."""
+        if color_weights is None:
+            color_weights = weights
         if len(points) == 0:
             return
 
@@ -71,7 +81,7 @@ class TSDFVolume:
         keep = ranges > 1e-6
         if not np.any(keep):
             return
-        points, colors, weights = points[keep], colors[keep], weights[keep]
+        points, colors, weights, color_weights = points[keep], colors[keep], weights[keep], color_weights[keep]
         directions, ranges = directions[keep], ranges[keep]
         directions = directions / ranges[:, None]
 
@@ -92,13 +102,16 @@ class TSDFVolume:
         dirs_rep = np.repeat(directions, n_samples, axis=0)[in_bounds]
         colors_rep = np.repeat(colors, n_samples, axis=0)[in_bounds]
         w_rep = np.repeat(weights, n_samples, axis=0)[in_bounds]
+        cw_rep = np.repeat(color_weights, n_samples, axis=0)[in_bounds]
 
         sdf = np.einsum("ij,ij->i", pts_rep - voxel_centers, dirs_rep)
         sdf = np.clip(sdf, -self.truncation_distance, self.truncation_distance)
         # taper contribution weight near the truncation limit so a single new
         # scan's coarse guess at the band edge cannot overwrite a voxel that
         # many earlier scans have already converged on
-        w_rep = w_rep * np.clip(1.0 - np.abs(sdf) / self.truncation_distance, 0.05, 1.0)
+        taper = np.clip(1.0 - np.abs(sdf) / self.truncation_distance, 0.05, 1.0)
+        w_rep = w_rep * taper
+        cw_rep = cw_rep * taper
 
         uniq, inv = np.unique(linear, return_inverse=True)
         local_w = np.bincount(inv, weights=w_rep, minlength=len(uniq))
@@ -106,22 +119,27 @@ class TSDFVolume:
 
         self.weight[uniq] += local_w
         self.wsdf[uniq] += local_wsdf
+        self.cweight[uniq] += np.bincount(inv, weights=cw_rep, minlength=len(uniq))
         for c in range(3):
-            self.wcolor[uniq, c] += np.bincount(inv, weights=w_rep * colors_rep[:, c], minlength=len(uniq))
+            self.wcolor[uniq, c] += np.bincount(inv, weights=cw_rep * colors_rep[:, c], minlength=len(uniq))
 
-    def carve(self, points, origins, carve_weight, keep_voxel=None):
+    def carve(self, points, origins, carve_weight, keep_voxel=None, stop_margin=None):
         """Free-space update along the rays origins -> points, stopping one
         truncation distance plus one voxel short of each endpoint (so the
         surface band itself is left to `integrate`). Every already-observed
         voxel crossed by at least one ray gets one free-space observation
-        (sdf = +truncation, weight `carve_weight`) per call; each voxel's
-        colour average is preserved. `keep_voxel`, if given, maps (M,3) voxel
-        centres to a boolean mask of voxels allowed to be carved."""
+        (sdf = +truncation, weight `carve_weight`) per call. Colour has its
+        own weight sum, so it is left untouched. `keep_voxel`, if given, maps (M,3) voxel
+        centres to a boolean mask of voxels allowed to be carved. `stop_margin`
+        (scalar or (N,)) overrides how far short of each endpoint a ray stops,
+        e.g. one voxel for rays ending on a surface that is not fused."""
         if len(points) == 0:
             return 0
         directions = points - origins
         ranges = np.linalg.norm(directions, axis=1)
-        stop = ranges - (self.truncation_distance + self.voxel_size)
+        if stop_margin is None:
+            stop_margin = self.truncation_distance + self.voxel_size
+        stop = ranges - stop_margin
         ok = stop > self.voxel_size
         if not np.any(ok):
             return 0
@@ -143,10 +161,7 @@ class TSDFVolume:
         if len(linear) == 0:
             return 0
 
-        w_old = self.weight[linear]
-        w_new = w_old + carve_weight
-        self.wcolor[linear] *= (w_new / w_old)[:, None]
-        self.weight[linear] = w_new
+        self.weight[linear] += carve_weight
         self.wsdf[linear] += carve_weight * self.truncation_distance
         return len(linear)
 
@@ -179,7 +194,8 @@ class TSDFVolume:
 
         tsdf = np.where(observed, wsdf / np.maximum(weight, 1e-6), self.truncation_distance)
         color = np.zeros_like(wcolor)
-        color[observed] = wcolor[observed] / np.maximum(weight[observed], 1e-6)[:, None]
+        cweight = self.cweight.reshape(self.dims)
+        color[observed] = wcolor[observed] / np.maximum(cweight[observed], 1e-12)[:, None]
 
         verts, faces, _normals, _values = marching_cubes(
             tsdf, level=0.0, spacing=(self.voxel_size,) * 3, mask=mask

@@ -1,4 +1,5 @@
 {
+  "name": "coverage1",
   "bag": "/home/autosweep/autosweep/dataset22jul/coverage1_lipede",
   "map_dir": "/home/autosweep/autosweep/glim_maps/coverage1",
   "voxel_size_m": 0.03,
@@ -9,22 +10,56 @@
   "bottom_ring_min_range_m": 0.8,
   "edge_jump_m": 0.3,
   "padding_m": 6.0,
+  "padding_below_floor_m": 0.5,
+  "tsdf_bounds_min": [
+    -12.0,
+    -5.67,
+    -1.29
+  ],
   "max_image_dt_s": 0.09,
+  "intensity_color_weight": 0.02,
   "min_weight": 1.5,
-  "scans_processed": 3113,
-  "points_fused": 148069927,
-  "points_coloured_from_rgb_pct": 17.108398385311556,
+  "floor_filter": true,
+  "floor_margin_m": 0.05,
+  "ceiling_height_m": null,
+  "floor_model": {
+    "normal": [
+      -0.004606,
+      -0.034252,
+      0.999403
+    ],
+    "offset_m": 0.509004,
+    "tilt_from_world_z_deg": 1.981,
+    "cell_size_m": 1.0,
+    "grid_shape": [
+      24,
+      23
+    ],
+    "cell_correction_range_m": [
+      -0.0312,
+      0.0717
+    ]
+  },
+  "points_dropped_by_floor_ceiling": 5634773,
+  "carve_ray_stride": 8,
+  "carve_weight": 0.2,
+  "carve_floor_clearance_m": 0.1,
+  "free_space_voxel_updates": 142527066,
+  "scans_read": 3113,
+  "scans_fused": 3009,
+  "points_fused": 142435154,
+  "points_coloured_from_rgb_pct": 17.304301155878978,
   "intensity_normalisation_range": [
     7.0,
     1166.0
   ],
-  "vertices": 5600302,
-  "triangles": 10417942,
+  "vertices": 1939398,
+  "triangles": 3430818,
   "grid_dims": [
-    975,
-    932,
-    422
+    976,
+    933,
+    269
   ],
-  "observed_voxels": 8828949,
-  "total_voxels": 383471400
+  "observed_voxels": 9915498,
+  "total_voxels": 244953552
 }

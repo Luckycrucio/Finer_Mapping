@@ -57,7 +57,7 @@ def run_filter(f, poly):
     return out
 
 
-def finish_and_write(poly, out_dir, stem):
+def finish_and_write(poly, out_dir, stem, formats=("ply", "obj", "stl")):
     """Merge duplicate points, compute consistent outward normals and write
     <stem>.ply (binary, per-vertex RGB), .obj and .stl (geometry only)."""
     clean = vtk.vtkCleanPolyData()
@@ -70,6 +70,8 @@ def finish_and_write(poly, out_dir, stem):
     final = run_filter(normals, cleaned)
 
     for ext, writer_cls in [("ply", vtk.vtkPLYWriter), ("obj", vtk.vtkOBJWriter), ("stl", vtk.vtkSTLWriter)]:
+        if ext not in formats:
+            continue
         writer = writer_cls()
         writer.SetFileName(str(out_dir / f"{stem}.{ext}"))
         writer.SetInputData(final)

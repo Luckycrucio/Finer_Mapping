@@ -24,6 +24,12 @@ TSDF fusion; each can be switched off by setting its parameter to 0.
   6. Quadric decimation by --decimate (fraction of triangles to remove),
      which mostly merges triangles on flat areas.
 
+The build's synthetic floor is found in the input (the connected piece lying
+exactly on the floor model, or on two planes parallel to it), set aside before step 1
+and added back unchanged after step 6; step 4 is skipped then, since there is
+no fused floor left to flatten. --refine-floor-slab processes it like the
+rest instead.
+
 If the floor model is missing (e.g. a mesh built before floor estimation
 existed), it is estimated from the mesh itself, using upward-facing vertices
 near the GLIM trajectory (--map-dir).
@@ -42,6 +48,7 @@ from scipy.spatial import cKDTree
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from src.floor import FloorModel, estimate_floor  # noqa: E402
+from src.floor_slab import find_slab  # noqa: E402
 from src.mesh_io import arrays_from_polydata, finish_and_write, polydata_from_arrays, read_ply, run_filter  # noqa: E402
 from src.trajectory import Trajectory  # noqa: E402
 
@@ -74,11 +81,17 @@ def parse_args():
                    help="only flatten vertices whose normal is within this many degrees of the floor normal")
     p.add_argument("--fill-holes", type=float, default=0.3,
                    help="fill holes up to about this size in metres (0 disables)")
+    p.add_argument("--refine-floor-slab", action="store_true",
+                   help="treat the build's synthetic floor slab like the rest of the mesh instead of "
+                        "setting it aside and adding it back unchanged")
     p.add_argument("--decimate", type=float, default=0.5,
                    help="fraction of triangles to remove by quadric decimation (0 disables)")
     args = p.parse_args()
 
-    args.input = Path(args.input or here / "outputs" / args.name / f"{args.name}_finer_mesh.ply")
+    finer = here / "outputs" / args.name / f"{args.name}_finer_mesh.ply"
+    if args.input is None and finer.is_file():
+        args.input = finer
+    args.input = Path(args.input or here / "outputs" / args.name / f"{args.name}_mesh.ply")
     args.out_dir = Path(args.out_dir or args.input.parent)
     args.floor_model = Path(args.floor_model or args.input.parent / "floor_model.npz")
     args.map_dir = Path(args.map_dir or Path(args.maps_root) / args.name)
@@ -137,11 +150,29 @@ def main():
     if args.floor_model.is_file():
         floor = FloorModel.load(args.floor_model)
         log(f"floor model from {args.floor_model}")
+        # the build saves the floor model in GLIM's frame but may shift its mesh
+        # along z (output_z_offset_m in its report): follow the mesh
+        build_report = args.input.parent / "finer_map_report.json"
+        if build_report.is_file():
+            z_offset = json.loads(build_report.read_text()).get("output_z_offset_m", 0.0)
+            if z_offset:
+                floor = floor.shifted_z(z_offset)
+                log(f"floor model shifted by {z_offset:+.4f} m in z to match the build's output frame")
     else:
         log(f"no {args.floor_model}; estimating the floor from the mesh and {args.map_dir / 'traj_lidar.txt'}")
         floor = floor_from_mesh(verts, faces, args.map_dir)
         floor.save(args.out_dir / "floor_model.npz")
     report["floor_model"] = floor.summary()
+
+    # set the synthetic floor slab aside: none of the steps below may touch it
+    slab = None
+    if not args.refine_floor_slab:
+        is_slab = find_slab(verts, faces, floor)
+        if is_slab.any():
+            slab = keep_faces(verts, faces, colors, is_slab)
+            verts, faces, colors = keep_faces(verts, faces, colors, ~is_slab)
+            log(f"floor slab: set aside {int(is_slab.sum()):,} triangles, added back unchanged at the end")
+            report["floor_slab_triangles"] = int(is_slab.sum())
 
     # 1. clip below the floor / above the ceiling
     if args.clip_margin > 0 or args.ceiling_height is not None:
@@ -185,8 +216,11 @@ def main():
         poly = run_filter(smooth, poly)
         log(f"smoothing: {args.smooth_iterations} windowed-sinc iterations, pass band {args.smooth_passband}")
 
-    # 4. flatten the floor
-    if args.flatten_tolerance > 0:
+    # 4. flatten the floor (not when a synthetic slab replaces it: the input
+    # then has no floor, only the bases of objects standing on it)
+    if slab is not None and args.flatten_tolerance > 0:
+        log("floor flattening: skipped, the synthetic floor slab replaces the floor")
+    elif args.flatten_tolerance > 0:
         verts, faces, colors = arrays_from_polydata(poly)
         h = floor.height_above_floor(verts)
         normals = vertex_normals(verts, faces)
@@ -233,6 +267,15 @@ def main():
         if poly.GetNumberOfCells() > n_before * (1.0 - args.decimate) * 1.05:
             log("  warning: decimation stopped short of --decimate")
         report["decimation_stray_vertices"] = int(stray.sum())
+
+    # 7. add the synthetic floor slab back, untouched by the steps above
+    if slab is not None:
+        verts, faces, colors = arrays_from_polydata(poly)
+        s_verts, s_faces, s_colors = slab
+        poly = polydata_from_arrays(np.concatenate([verts, s_verts]),
+                                    np.concatenate([faces, s_faces + len(verts)]),
+                                    np.concatenate([colors, s_colors]))
+        log(f"floor slab: added back {len(s_faces):,} triangles")
 
     final = finish_and_write(poly, args.out_dir, f"{args.name}_refined_mesh")
     report["output_vertices"] = int(final.GetNumberOfPoints())

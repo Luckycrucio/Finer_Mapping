@@ -64,6 +64,31 @@ class FloorModel:
         points = np.asarray(points, dtype=np.float64)
         return points - self.height_above_floor(points)[:, None] * self.normal
 
+    def lowest_z(self, xy_min, xy_max):
+        """Lowest world z the floor reaches over the box [xy_min, xy_max]: the
+        tilted plane is lowest at one of the box corners, then shifted by the
+        most negative per-cell correction."""
+        n = self.normal
+        corners = np.array([[x, y] for x in (xy_min[0], xy_max[0]) for y in (xy_min[1], xy_max[1])])
+        plane_z = -(corners @ n[:2] + self.offset) / n[2]
+        return float(plane_z.min() + min(self.grid.min(), 0.0) / n[2])
+
+    def floor_z(self, xy):
+        """z of the floor model's surface (plane + per-cell correction) at (N,2)
+        world xy points."""
+        xy = np.asarray(xy, dtype=np.float64)
+        return (self._correction(xy) - self.offset - xy @ self.normal[:2]) / self.normal[2]
+
+    def plane_z(self, xy, height=0.0):
+        """z of the plane parallel to the global plane at `height` above it."""
+        xy = np.asarray(xy, dtype=np.float64)
+        return (height - self.offset - xy @ self.normal[:2]) / self.normal[2]
+
+    def shifted_z(self, dz):
+        """The same floor in a frame whose z is this frame's z + `dz`."""
+        return FloorModel(self.normal, self.offset - self.normal[2] * dz, self.grid_origin,
+                          self.cell_size, self.grid)
+
     def tilt_deg(self):
         return float(np.degrees(np.arccos(np.clip(abs(self.normal[2]), -1.0, 1.0))))
 

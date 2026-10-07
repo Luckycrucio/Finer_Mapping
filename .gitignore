@@ -5,9 +5,7 @@ __pycache__/
 cache/*
 !cache/.gitkeep
 
-outputs/coverage1_finer_mesh.obj
-outputs/coverage1_finer_mesh.stl
-outputs/coverage1_finer_mesh.ply
+
 outputs/*/*_finer_mesh.obj
 outputs/*/*_finer_mesh.stl
 outputs/*/*_finer_mesh.ply

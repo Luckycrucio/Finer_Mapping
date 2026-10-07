@@ -1,6 +1,6 @@
 # Finer-detail RGB mesh via TSDF fusion
 
-![Mesh preview in a 3D viewer](outputs/coverage1_old/mesh_screenshot.png)
+![Mesh preview in a 3D viewer](docs/images/coverage1_mesh_screenshot.png)
 
 This is a second, independent reconstruction of the same environment as
 [`../coverage1_edited/`](../coverage1_edited/), built to get past that
@@ -17,22 +17,26 @@ screened Poisson (which fits an implicit function to oriented points and can
 extrapolate across gaps) to **TSDF volumetric fusion** (which only ever
 records what was actually observed along real sensor rays), and adds
 photographic RGB colour where the camera saw a point, instead of grayscale
-LiDAR intensity only.
+LiDAR intensity only. The one deliberate exception is the floor: since the
+map is meant for simulation, the measured floor is not fused but replaced by
+a smooth synthetic floor surface lying exactly on the fitted floor model,
+coloured from the floor points (step 4).
 
 Two steps, both taking the bag name:
 
 1. `build_finer_map.py <name>` fuses the raw bag into
    `outputs/<name>/<name>_finer_mesh.ply` (binary PLY with per-vertex RGB),
-   estimating the floor on the way and discarding below-floor returns.
+   estimating the floor on the way, discarding below-floor returns and
+   replacing the measured floor with a smooth, coloured synthetic floor.
 2. `refine_mesh.py <name>` post-processes that mesh into
    `outputs/<name>/<name>_refined_mesh.ply` (**recommended output**): small
-   floating pieces removed, smoothed, floor flattened, small holes filled and
-   decimated to a size a viewer opens comfortably.
+   floating pieces removed, smoothed, small holes filled and decimated to a
+   size a viewer opens comfortably, with the synthetic floor added back unchanged.
 
 See the `finer_map_report.json` / `refine_report.json` next to each mesh for
-the exact figures behind it. OBJ and STL are also exported;
-STL has no portable vertex-colour support, use the PLY for the coloured
-result. Each output folder's `preview.png` is a static top-down
+the exact figures behind it. The build writes a single PLY (fused objects +
+synthetic floor); `refine_mesh.py` also exports OBJ and STL, which have no
+portable vertex-colour support, so use the PLY for the coloured result. Each output folder's `preview.png` is a static top-down
 scatter render (`make_preview.py`) for a quick look without a mesh viewer.
 See "Visualizing the output" below for how to view either.
 
@@ -45,7 +49,7 @@ See "Visualizing the output" below for how to view either.
 | Median point spacing | ~6.35 cm | limited by the sensor's own angular resolution, well under 6.35 cm at typical room range |
 | Colour | LiDAR intensity (grayscale) only | Camera RGB where visible, intensity grayscale fallback |
 | Reconstruction | Screened Poisson (PCL) | TSDF volumetric fusion (custom, this pipeline) |
-| Extrapolation behaviour | Can bridge gaps with a plausible-looking but unmeasured surface (trimmed afterwards to 20 cm of source data) | Only ever produces surface within one voxel of somewhere a ray actually terminated |
+| Extrapolation behaviour | Can bridge gaps with a plausible-looking but unmeasured surface (trimmed afterwards to 20 cm of source data) | Only ever produces surface within one voxel of somewhere a ray actually terminated, except the floor, which is a modelled plane filling the whole floor outline |
 
 GLIM's own map storage is intentionally decimated for real-time SLAM, so
 `coverage1_edited`'s 6.35 cm spacing is a hard ceiling on Poisson's output no
@@ -148,14 +152,14 @@ just the last 4 rings (clearing the observed cluster with margin) rather
 than raising `--min-range` globally, which would also discard legitimate
 close-up detail the upper rings pick up near walls and furniture.
 
-### 4. Floor estimation and below-floor rejection (`src/floor.py`)
+### 4. Floor estimation, below-floor rejection and the synthetic floor (`src/floor.py`, `src/floor_slab.py`)
 
 Points below the floor are not real geometry: they are mostly LiDAR
 multipath returns (the beam bounces off a glossy floor and the sensor records
 a point "inside" it) plus noise. In the earlier coverage1 build
-(`outputs/coverage1_finer_mesh/`), 13.6% of the mesh vertices sat more than
-5 cm under the floor and 5.4% more than 30 cm under it; the current build has
-0.1% and 0%. They are removed *before* fusion rather than cut
+(`outputs/coverage1_first/`), 13.6% of the mesh vertices sat more than
+5 cm under the floor and 5.4% more than 30 cm under it; with this filter
+(before the floor was replaced by a synthetic one) that dropped to 0.1% and 0%. They are removed *before* fusion rather than cut
 out of the mesh afterwards, so they never create surfaces or blend into
 colours in the first place.
 
@@ -193,6 +197,71 @@ above it too. The model is saved as `floor_model.npz` next to the mesh (reused
 by `refine_mesh.py`, or by another build via `--floor-model`), and summarised
 in `finer_map_report.json`.
 
+**The floor is not fused; a synthetic floor replaces it** (`src/floor_slab.py`).
+The map is meant for simulation, where the floor should be a clean, smooth
+surface, and a fused floor is never quite one. It also keeps anything left
+on it (the feet of people who walked by) joined to it, so `refine_mesh.py`'s
+small-component filter cannot remove it. So during fusion a point within
+`--floor-band` (5 cm) of the local floor whose normal is within
+`--floor-normal-angle` (30 deg) of the floor normal (or that has no valid
+normal) counts as floor and is **not integrated**. Points near the floor
+that face sideways (the bases of walls, furniture legs) are fused as usual,
+so objects still reach down to the floor. Floor points are still used for
+two things:
+
+- **Carving.** Their rays sweep the space just above the floor, and since
+  there is no fused floor to protect, a ray that hit the floor carves right
+  down to one voxel short of it (see step 6), which clears what people left
+  behind close to the floor.
+- **Colour.** Their colour (RGB-first, same weighting as step 5) is
+  accumulated into a 2-D grid of voxel-sized cells in world xy.
+
+After fusion, the cells that saw floor, closed over gaps up to
+`--floor-fill-radius` (15 cm), with enclosed holes (under furniture, unseen
+patches) filled and only the largest connected region kept, give the map's
+floor outline. Over it the build adds the synthetic floor, with a vertex on
+every voxel-cell corner and per-vertex colour from the grid (cells without
+floor colour of their own take the nearest one's). By default
+(`--floor-slab-top model`) it is a **single upward-facing surface lying
+exactly on the floor model**: the global plane plus the per-cell correction,
+which is median-filtered and bilinearly interpolated, so the surface is
+smooth with no steps. It is not one perfect plane (on coverage1 it stays
+within -3 to +7 cm of the global plane, from GLIM drift or real
+unevenness), but walls and objects, which were fused down to the real local
+floor, meet it with no gaps and without sinking into it, and there are no
+extra layers or margins.
+
+Two alternatives make it a **closed flat slab** (top and bottom faces
+parallel to the global plane, side walls along the outline):
+`--floor-slab-top highest` puts the top at the measured floor's highest point
+(+7.2 cm on coverage1), so every wall and object base ends inside the slab,
+at the cost of objects on the lowest parts of the floor looking up to about
+10 cm shorter; `--floor-slab-top plane` puts it on the global plane (leaving
+gaps of up to 7 cm under walls where the floor is higher). The bottom face
+is at the measured floor's lowest point minus `--floor-margin`, or
+`--floor-slab-thickness` below the top. A slab shows as two parallel floor
+layers in a viewer (its top and bottom faces).
+
+The synthetic floor is merged with the fused geometry into the build's only
+mesh output, `<name>_finer_mesh.ply`. Nothing is cut where the two overlap:
+a few fused leftovers near the floor (and, with a flat slab, wall and object
+bases) can lie slightly below the floor surface, hidden under it. That is
+harmless for rendering, LiDAR/depth simulation and static collision, but the
+merged mesh is not one watertight solid.
+
+**Output frame: z = 0 on the floor.** The output mesh is shifted along z only
+(no rotation), so the synthetic floor's top surface is exactly at z = 0 under
+the GLIM origin (the robot's start pose); x and y are GLIM's. On coverage1
+the shift is +0.5002 m with the default floor surface (+0.4375 m with
+`--floor-slab-top highest`). Because the floor is tilted ~2 deg in GLIM's
+frame and the mesh is not rotated, the floor is only at z = 0 there: across
+the map it lies up to about +/-0.4 m from z = 0. The shift is recorded as
+`output_z_offset_m` in `finer_map_report.json` (add it to a GLIM z, e.g. of
+the trajectory, to get output coordinates); everything else in the report,
+and `floor_model.npz`, stays in GLIM's frame, since `--floor-model` is reused
+for fusion. `refine_mesh.py` reads the offset and shifts the floor model to
+match the mesh.
+
 ### 5. Colourisation, RGB-first (`src/colorizer.py`)
 
 `cache_frames()` walks the bag once and saves every `/rgb/image_raw` frame to
@@ -219,11 +288,22 @@ Points with no camera frame close enough in time, that land outside the
 image, are behind the camera, or lose the z-buffer test fall back to a
 percentile-normalised (1st/99th) grayscale of LiDAR intensity, using the same
 convention as `coverage1_edited/color_intensity.py`. In the run that produced
-the current output, 16.9% of fused points were coloured from RGB (see
+the current output, 17.3% of fused points were coloured from RGB (see
 `points_coloured_from_rgb_pct` in `outputs/<name>/finer_map_report.json` for
 whatever the most recent run actually measured) — the camera has a much
 narrower field of view than the LiDAR's full 360 deg sweep, so most points
 simply never appear in any frame; this is expected, not a bug.
+
+**RGB outweighs intensity in the voxel colour.** A voxel is usually hit by
+many points, some coloured from the camera and some only from intensity.
+Averaged with equal weight, the grayscale samples wash the photographic colour
+out (in the previous build only 36% of vertices were pure gray, yet many of
+the rest were RGB diluted with gray, not pure RGB). So colour has its own weight in the
+TSDF, separate from the geometric one, and an intensity sample counts
+`--intensity-color-weight` (0.02) times an RGB sample: any voxel the camera
+saw at least a few times ends up close to pure RGB, and voxels the camera
+never saw stay intensity gray as before. Setting it to 1.0 restores the old
+equal blend. The geometry is unaffected.
 
 ### 6. TSDF volumetric fusion (`src/tsdf_volume.py`)
 
@@ -247,7 +327,8 @@ it (occluded) — combined across scans with a running incidence-weighted
 average. This only touches voxels near an actual measured surface (a dense
 NumPy grid stays tractable at room scale without an octree/hash structure),
 and, unlike Poisson, never invents surface far from anywhere a ray actually
-terminated.
+terminated (the synthetic floor of step 4, added after fusion, is the one
+deliberate exception).
 
 **Free-space carving.** The band update above only ever records surfaces, so
 anything that was there for a while and then left (a person walking past, a
@@ -257,11 +338,14 @@ from the sensor up to one truncation distance + one voxel short of its
 endpoint, and every *already-observed* voxel it crossed gets one free-space
 observation (sdf = +truncation, weight `--carve-weight`, 0.2) per scan. A
 surface seen a few times and then repeatedly seen *through* fades away;
-static geometry, observed thousands of times, barely moves. Two guards keep
-real geometry safe: carving never touches voxels nothing has observed yet
-(so it cannot create surface), and it skips voxels within
-`--carve-floor-clearance` (10 cm) of the floor, where near-grazing rays would
-otherwise slowly erode it. Voxel colour averages are preserved. On coverage1
+static geometry, observed thousands of times, barely moves. Carving never
+touches voxels nothing has observed yet, so it cannot create surface. Rays
+that ended on the floor (not fused, see step 4) are walked to one voxel
+short of it instead of one truncation distance + one voxel, so carving
+reaches all the way down to the floor. (When the floor was still fused,
+carving had to skip the bottom 10 cm, where near-grazing rays would slowly
+erode it; `--carve-floor-clearance` still exists but now defaults to 0.)
+Colour has its own weight sum (see step 5), so carving never changes it. On coverage1
 this removed ~117k vertices, almost all of them the trails people left
 walking through the room during the recording (0.3-1.5 m high, long curved
 bands crossing the robot's route), at the cost of ~40% more fusion time
@@ -283,7 +367,8 @@ cut the coverage1 mesh from 5.6M to 2.1M vertices without losing measured
 surface: 91% of the earlier build's above-floor vertices are within 15 cm of
 the new mesh (the 7-13 cm band is the removed phantom layer). The rest were
 curtains along observation edges, most of them high up under the roof where
-coverage is sparse. If thin, sparsely seen structures (e.g. roof beams) matter,
+coverage is sparse. (With carving on top, and before the floor was replaced
+by a synthetic one, the build was 1.94M vertices.) If thin, sparsely seen structures (e.g. roof beams) matter,
 lowering `--min-weight` keeps more of them, at the cost of noisier surface.
 Per-vertex colour
 is sampled from the nearest voxel's accumulated colour average, and the
@@ -306,24 +391,39 @@ mesh is cleaned and given consistent normals with VTK before export
 | `--min-range` / `--max-range` | 0.5 / 15.0 m | Discard returns outside this range |
 | `--bottom-rings` / `--bottom-ring-min-range` | 4 / 0.8 m | Raise the min-range for the steepest-downward-looking rings only (see below) |
 | `--edge-jump` | 0.3 m | Within-ring range-discontinuity threshold for edge/mixed-pixel filtering |
-| `--padding` | 6.0 m | Metres of TSDF volume padding around the trajectory bounding box |
+| `--padding` | 6.0 m | Metres of TSDF volume padding around the trajectory bounding box (all faces except the bottom when a floor model exists) |
+| `--padding-below-floor` | 0.5 m | Bottom face of the volume: this far below the lowest point of the floor model (nothing is ever observed under the floor) |
 | `--max-image-dt` | 0.09 s | Max time gap between a scan column and the camera frame used to colour it |
+| `--intensity-color-weight` | 0.02 | Weight of an intensity-grayscale sample in a voxel's colour average, relative to an RGB sample (1.0 = equal blend) |
 | `--min-weight` | 1.5 | Minimum accumulated TSDF weight for a voxel to count as observed |
 | `--floor-margin` | 0.05 m | Drop points more than this far below the local floor |
 | `--ceiling-height` | off | Drop points more than this far above the floor |
 | `--floor-cell-size` | 1.0 m | Cell size of the floor model's per-cell height correction |
 | `--floor-sample-stride` | 10 | Estimate the floor from every N-th scan |
 | `--floor-model` | none | Reuse a `floor_model.npz` instead of estimating the floor again |
-| `--no-floor-filter` | off | Skip floor estimation and keep below-floor points |
+| `--no-floor-filter` | off | Skip floor estimation and keep below-floor points; the floor is then fused like everything else and no slab is made |
+| `--floor-band` | 0.05 m | Points up to this far above the local floor and facing up are floor: not fused, only used to colour the synthetic floor |
+| `--floor-normal-angle` | 30 deg | Max angle between a floor point's normal and the floor normal |
+| `--floor-slab-top` | `model` | Synthetic floor: a single surface exactly on the floor model (`model`), or a closed flat slab with its top at the measured floor's highest point (`highest`) or on the global plane (`plane`) |
+| `--floor-slab-thickness` | auto | Flat slab only: thickness; default reaches the measured floor's lowest point minus `--floor-margin` |
+| `--floor-fill-radius` | 0.15 m | Gaps in the observed floor closed before filling enclosed holes |
 | `--carve-ray-stride` | 8 | Free-space carving uses one ray in N per scan; 0 disables carving |
 | `--carve-weight` | 0.2 | Weight of one free-space observation per voxel per scan |
-| `--carve-floor-clearance` | 0.10 m | Never carve voxels this close to the floor |
+| `--carve-floor-clearance` | 0 m | Never carve voxels this close to the floor (not needed now that the floor is not fused) |
 | `--limit-scans` | none | Debug: process only the first N scans |
 | `--skip-frame-cache` | off | Reuse an existing `cache/<name>/` frame dump instead of re-extracting it |
 
 **Voxel size is a memory trade-off**, since the TSDF grid is dense (no
-octree): this run's bounding box needed ~380M voxels at 3 cm, ~5 float32
-arrays each -> a few GB of RAM. Halving the voxel size multiplies the voxel
+octree): coverage1's bounding box needs 975 x 932 x 269 = ~244M voxels at
+3 cm, 6 float32 values each (weight, weighted sdf, colour weight, weighted
+RGB) -> ~5.9 GB of RAM. The box is the trajectory's bounding box padded by
+`--padding` (6 m) on every side except the bottom, which sits only
+`--padding-below-floor` (0.5 m) under the lowest point of the floor model:
+nothing is ever observed under the floor, and padding it the full 6 m made
+the grid 422 voxels tall (383M voxels, ~7.7 GB) for no extra surface. The box's
+lower corner is snapped to a multiple of the voxel size, so voxels sit at the
+same world positions whatever the padding and two runs that differ only in
+bounds give the same mesh. Halving the voxel size multiplies the voxel
 count (and memory) by roughly 8x — see `finer_map_report.json`'s
 `grid_dims`/`total_voxels` for the actual numbers from this run before
 lowering `--voxel-size` further.
@@ -337,19 +437,25 @@ it can be tuned in seconds to minutes without re-running fusion:
 python3 refine_mesh.py coverage1
 ```
 
-It reads `outputs/<name>/<name>_finer_mesh.ply` and `floor_model.npz` and
+It reads `outputs/<name>/<name>_finer_mesh.ply` and `floor_model.npz`, and
 writes `outputs/<name>/<name>_refined_mesh.{ply,obj,stl}` plus
-`refine_report.json`. The steps, in order (set a parameter to 0 to skip that
-step):
+`refine_report.json`. The synthetic floor is first found in the input (the
+connected piece whose vertices all lie exactly on the floor model, or on two
+planes parallel to it for a flat slab, which fused geometry never does) and
+set aside, so the steps
+below only ever touch the fused geometry; it is added back unchanged at the
+end (`--refine-floor-slab` processes it like the rest instead). The steps,
+in order (set a parameter to 0 to skip that step):
 
 | Step | Flag (default) | What it does |
 |---|---|---|
 | Clip | `--clip-margin` (0.05 m), `--ceiling-height` (off) | Drops triangles with a vertex below the floor (or above the ceiling). Mostly a safety net, since the build already filters before fusion. |
 | Small pieces | `--min-component` (500 triangles) | Removes disconnected fragments from noise or surfaces glimpsed through glass |
 | Smoothing | `--smooth-iterations` (15), `--smooth-passband` (0.1) | Windowed-sinc (Taubin-style) smoothing: removes marching cubes' voxel-scale stair-steps without the shrinkage of plain Laplacian smoothing |
-| Floor flattening | `--flatten-tolerance` (0.03 m), `--flatten-max-angle` (25 deg) | Projects floor vertices (within tolerance of the floor, normal close to the floor normal) onto the floor model |
-| Hole filling | `--fill-holes` (0.3 m) | Closes holes up to about that size, mostly small gaps in the floor |
+| Floor flattening | `--flatten-tolerance` (0.03 m), `--flatten-max-angle` (25 deg) | Projects floor vertices (within tolerance of the floor, normal close to the floor normal) onto the floor model. Skipped when the input has a synthetic floor: there is no fused floor left to flatten |
+| Hole filling | `--fill-holes` (0.3 m) | Closes holes up to about that size in walls and objects |
 | Decimation | `--decimate` (0.5) | Quadric decimation (geometry only) removing that fraction of triangles, mostly on flat areas; each remaining vertex takes the colour of the nearest pre-decimation vertex |
+| Synthetic floor | `--refine-floor-slab` (off) | Adds the synthetic floor set aside at the start back, unchanged |
 
 If `floor_model.npz` is missing (for example a mesh built before floor
 estimation existed), the floor is estimated from the mesh itself, from
@@ -357,8 +463,8 @@ upward-facing vertices near the GLIM trajectory (`--map-dir`, default
 `<maps-root>/<name>`). `--input` refines any other mesh:
 
 ```bash
-python3 refine_mesh.py coverage1 --input outputs/coverage1_finer_mesh/coverage1_finer_mesh.ply \
-    --out-dir outputs/coverage1_finer_mesh
+python3 refine_mesh.py coverage1 --input outputs/coverage1_first/coverage1_finer_mesh.ply \
+    --out-dir outputs/coverage1_first
 ```
 
 ## Running it
@@ -433,18 +539,18 @@ MeshLab for an actual look at surface quality.
 | `outputs/<name>/<name>_refined_mesh.ply` | Recommended: refined mesh with per-vertex RGB (`refine_mesh.py`) |
 | `outputs/<name>/<name>_refined_mesh.obj` / `.stl` | Geometry-only refined alternatives |
 | `outputs/<name>/refine_report.json` | What each refinement step removed/added, parameters used |
-| `outputs/<name>/<name>_finer_mesh.ply` | Raw fused mesh with per-vertex RGB (`build_finer_map.py`) |
-| `outputs/<name>/<name>_finer_mesh.obj` | Geometry-only OBJ alternative |
-| `outputs/<name>/<name>_finer_mesh.stl` | Geometry-only STL; assume metres, no colour |
+| `outputs/<name>/<name>_finer_mesh.ply` | The build's only mesh: fused geometry plus the synthetic floor, per-vertex RGB, shifted in z so the floor is at z = 0 under the GLIM origin (`build_finer_map.py`) |
 | `outputs/<name>/finer_map_report.json` | Parameters used, scan/point counts, RGB coverage %, mesh/grid statistics |
-| `outputs/<name>/floor_model.npz` | Fitted floor (plane + per-cell correction), reused by `refine_mesh.py` / `--floor-model` |
+| `outputs/<name>/floor_model.npz` | Fitted floor (plane + per-cell correction) in GLIM's frame, reused by `refine_mesh.py` (shifted by the report's `output_z_offset_m`) / `--floor-model` |
 | `outputs/<name>/build.log` | Console log of the build, if it was redirected there |
 | `outputs/<name>/preview.png` | Static top-down scatter preview, coloured by actual vertex RGB/intensity |
-| `outputs/coverage1_finer_mesh/` | Earlier full coverage1 build (from the `coverage1_lipede` bag, before floor filtering, carving and the marching-cubes fixes), with its `build.log` and `mesh_screenshot.png` |
+| `outputs/coverage1_first/` | Earlier full coverage1 build (from the `coverage1_lipede` bag, before floor filtering, carving and the marching-cubes fixes), with its `build.log` and `mesh_screenshot.png` |
+| `outputs/coverage1_old/` | Previous full coverage1 build (floor filtering and carving, but full 6 m padding below the floor and equal-weight RGB/intensity colour), with its refined mesh |
 | `cache/<name>/frames/*.jpg`, `cache/<name>/timestamps.npy` | Cached camera frames (pass 1 output, reused across runs) |
 | `make_preview.py` | Regenerates `outputs/<name>/preview.png` (or `preview_refined.png`) from that bag's mesh |
-| `refine_mesh.py` | Mesh post-processing: clip, small pieces, smoothing, floor flattening, hole filling, decimation |
+| `refine_mesh.py` | Mesh post-processing: sets the synthetic floor aside, then clip, small pieces, smoothing, hole filling, decimation |
 | `src/floor.py` | Floor model: candidate selection, RANSAC + SVD plane fit, per-cell correction |
+| `src/floor_slab.py` | Floor colour grid, floor outline, the synthetic floor mesh (model surface or flat slab), and finding it again in a merged mesh |
 | `src/mesh_io.py` | VTK mesh conversion and PLY/OBJ/STL export shared by both scripts |
 | `src/trajectory.py` | GLIM trajectory loading and pose interpolation |
 | `src/extrinsics.py` | Sensor calibration loading (`config_sensors.json` -> matrices) |
@@ -476,10 +582,19 @@ MeshLab for an actual look at surface quality.
 - **Carving only removes what it has already seen**: it only acts on voxels
   observed before the ray passes through them, so something that appears
   only at the very end of the bag and is never seen through again stays.
-  Carving is also kept out of the 10 cm above the floor, so a ghost standing
-  on the floor (e.g. feet) can leave a low remnant; `--min-component` in
-  `refine_mesh.py` usually removes such pieces.
+  Rays stop one voxel short of the floor, and short of the band around any
+  other surface they hit, so a ghost within a few cm of where rays end can
+  leave a low remnant; now that it is no longer joined to a fused floor,
+  `--min-component` in `refine_mesh.py` usually removes it.
+- **The synthetic floor follows the floor model, not the real floor
+  point by point**: it is as smooth as the 1 m per-cell correction, so
+  unevenness finer than that is gone; with a flat slab
+  (`--floor-slab-top highest`) objects on the lowest parts of the floor
+  end up to ~10 cm inside it (see step 4). Low, flat, upward-facing things
+  within `--floor-band` of the floor (mats, thin cables) are classified as
+  floor and disappear into it.
 - **Camera FOV is narrower than the LiDAR's**, so a large fraction of the
-  mesh is coloured from LiDAR intensity, not RGB — check
+  mesh is coloured from LiDAR intensity, not RGB (RGB wins wherever the
+  camera did see a surface, see step 5) — check
   `finer_map_report.json`'s `points_coloured_from_rgb_pct` for the actual
   figure from a given run.
