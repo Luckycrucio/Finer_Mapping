@@ -45,8 +45,8 @@ See README.md for the full pipeline explanation. Summary:
      floor outline, lying exactly on the floor model and coloured from the
      floor points (`src.floor_slab`), shift the result in z so the floor is
      at z = 0 under the GLIM origin, and export them together as a single PLY, plus the
-     floor model (floor_model.npz, reused by refine_mesh.py) and a JSON
-     report.
+     floor model (floor_model.npz, reusable via --floor-model and read by
+     map_refinement.py) and a JSON report.
 """
 import argparse
 import json
@@ -378,8 +378,7 @@ def main():
         z_offset = -float(top_z(np.zeros((1, 2)))[0])
         verts = verts + np.array([0.0, 0.0, z_offset])
         log(f"output frame: z shifted by {z_offset:+.4f} m (slab top at z = 0 under the GLIM origin)")
-    # the only mesh output: fused objects + floor slab (refine_mesh.py separates
-    # the slab again by itself, see src.floor_slab.find_slab)
+    # the only mesh output: fused objects + floor slab
     finish_and_write(polydata_from_arrays(verts, faces, colors_u8), out_dir, f"{args.name}_finer_mesh",
                      formats=("ply",))
 

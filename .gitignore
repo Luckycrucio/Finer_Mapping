@@ -9,6 +9,8 @@ cache/*
 outputs/*/*_finer_mesh.obj
 outputs/*/*_finer_mesh.stl
 outputs/*/*_finer_mesh.ply
-outputs/*/*_refined_mesh.obj
-outputs/*/*_refined_mesh.stl
-outputs/*/*_refined_mesh.ply
+outputs/*/*_refined_map.ply
+outputs/*/*_refined_map.obj
+outputs/*/*_refined_map.stl
+outputs/*/gazebo/
+outputs/*/enclosure_fit.png

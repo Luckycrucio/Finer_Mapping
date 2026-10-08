@@ -130,7 +130,7 @@ def find_slab(verts, faces, floor, tol=1e-3, min_faces=100):
     connected pieces whose vertices all lie (within `tol` metres) either on the
     floor model's surface itself, or on one of two planes parallel to its
     global plane (a flat slab). Fused geometry is never that exact, so nothing
-    else matches."""
+    else matches. `floor` must be in the mesh's frame (see FloorModel.shifted_z)."""
     edges = np.concatenate([faces[:, [0, 1]], faces[:, [1, 2]]])
     graph = sparse.coo_matrix((np.ones(len(edges), dtype=np.int8), (edges[:, 0], edges[:, 1])),
                               shape=(len(verts), len(verts)))

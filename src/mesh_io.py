@@ -1,4 +1,4 @@
-"""VTK mesh conversion and export shared by build_finer_map.py and refine_mesh.py."""
+"""VTK mesh conversion and export shared by build_finer_map.py and map_refinement.py."""
 import numpy as np
 import vtk
 from vtk.util import numpy_support
@@ -57,16 +57,22 @@ def run_filter(f, poly):
     return out
 
 
-def finish_and_write(poly, out_dir, stem, formats=("ply", "obj", "stl")):
-    """Merge duplicate points, compute consistent outward normals and write
-    <stem>.ply (binary, per-vertex RGB), .obj and .stl (geometry only)."""
+def finish_and_write(poly, out_dir, stem, formats=("ply", "obj", "stl"), orient=True):
+    """Merge duplicate points, compute normals and write <stem>.ply (binary,
+    per-vertex RGB), .obj and .stl (geometry only). With `orient`, triangle
+    windings are first made consistent and outward-facing; without it every
+    triangle keeps its winding (needed for one-sided, inward-facing parts)."""
     clean = vtk.vtkCleanPolyData()
     cleaned = run_filter(clean, poly)
 
     normals = vtk.vtkPolyDataNormals()
     normals.SplittingOff()
-    normals.ConsistencyOn()
-    normals.AutoOrientNormalsOn()
+    if orient:
+        normals.ConsistencyOn()
+        normals.AutoOrientNormalsOn()
+    else:
+        normals.ConsistencyOff()
+        normals.AutoOrientNormalsOff()
     final = run_filter(normals, cleaned)
 
     for ext, writer_cls in [("ply", vtk.vtkPLYWriter), ("obj", vtk.vtkOBJWriter), ("stl", vtk.vtkSTLWriter)]:

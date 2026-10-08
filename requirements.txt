@@ -1,1 +1,3 @@
 scikit-image
+xatlas
+pyfqmr

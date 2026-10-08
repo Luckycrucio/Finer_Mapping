@@ -1,0 +1,146 @@
+{
+  "name": "coverage1",
+  "input": "/home/autosweep/finer_mapping/outputs/coverage1/coverage1_finer_mesh.ply",
+  "floor_model": "/home/autosweep/finer_mapping/outputs/coverage1/floor_model.npz",
+  "build_report": "/home/autosweep/finer_mapping/outputs/coverage1/finer_map_report.json",
+  "steps": [
+    "cleanup",
+    "enclosure",
+    "floor",
+    "clip",
+    "texture",
+    "collision",
+    "gazebo"
+  ],
+  "input_mesh": {
+    "vertices": 2016523,
+    "triangles": 3595085,
+    "fused_triangles": 2733101,
+    "floor_triangles": 861984,
+    "enclosure_triangles": 0
+  },
+  "output_mesh": {
+    "vertices": 1896840,
+    "triangles": 3636202,
+    "fused_triangles": 2144392,
+    "floor_triangles": 881390,
+    "enclosure_triangles": 610420,
+    "vertices_after_merge": 1895215
+  },
+  "cleanup": {
+    "broken_triangles_removed": 13,
+    "min_triangles": 200,
+    "small_pieces_removed": 10460,
+    "small_piece_triangles_removed": 67005,
+    "ceiling_height_m": 4.567,
+    "ceiling_detected": true,
+    "ceiling_cut_height_m": 4.467,
+    "ceiling_triangles_removed": 463271,
+    "seconds": 3.57
+  },
+  "enclosure": {
+    "corners_xy": [
+      [
+        -6.9656,
+        -0.7349
+      ],
+      [
+        13.7254,
+        -0.26
+      ],
+      [
+        13.1166,
+        18.8165
+      ],
+      [
+        -7.3069,
+        18.3955
+      ]
+    ],
+    "side_lengths_m": [
+      20.6965,
+      19.0862,
+      20.4279,
+      19.1334
+    ],
+    "interior_angles_deg": [
+      89.708,
+      89.487,
+      90.647,
+      90.159
+    ],
+    "initial_rectangle": [
+      [
+        -7.2048,
+        -1.2288
+      ],
+      [
+        13.7898,
+        -0.909
+      ],
+      [
+        13.4873,
+        18.9541
+      ],
+      [
+        -7.5073,
+        18.6344
+      ]
+    ],
+    "margin_median_distance_m": 0.1157,
+    "roof_height_above_floor_plane_m": 4.5268,
+    "roof_color_rgb": [
+      94,
+      93,
+      93
+    ],
+    "vertices": 307695,
+    "triangles": 610420,
+    "seconds": 1.0
+  },
+  "floor": {
+    "cell_m": 0.03,
+    "cells_added": 17478,
+    "area_added_m2": 15.73,
+    "triangles_added": 34956,
+    "vertices_added": 16756,
+    "seconds": 0.46
+  },
+  "clip": {
+    "margin_m": 0.1,
+    "triangles_removed": 73970,
+    "seconds": 0.93
+  },
+  "texture": {
+    "texel_m": 0.015,
+    "fused_keep_fraction": 0.3,
+    "fused_triangles": 643316,
+    "fused_tiles": 32,
+    "triangles": 661582,
+    "vertices": 595462,
+    "pages": [
+      [
+        7696,
+        2699
+      ]
+    ],
+    "files": [
+      "/home/autosweep/finer_mapping/outputs/coverage1/gazebo/coverage1_map/meshes/visual.obj",
+      "/home/autosweep/finer_mapping/outputs/coverage1/gazebo/coverage1_map/meshes/visual.mtl",
+      "/home/autosweep/finer_mapping/outputs/coverage1/gazebo/coverage1_map/meshes/visual_0.png"
+    ],
+    "seconds": 39.82
+  },
+  "collision": {
+    "triangles": 22010,
+    "fused_triangles": 20000,
+    "file": "/home/autosweep/finer_mapping/outputs/coverage1/gazebo/coverage1_map/meshes/collision.stl",
+    "seconds": 7.96
+  },
+  "gazebo": {
+    "model_dir": "/home/autosweep/finer_mapping/outputs/coverage1/gazebo/coverage1_map",
+    "world": "/home/autosweep/finer_mapping/outputs/coverage1/gazebo/coverage1_world.sdf",
+    "seconds": 0.0
+  },
+  "seconds": 59.82
+}

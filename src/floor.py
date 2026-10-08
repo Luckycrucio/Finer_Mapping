@@ -32,8 +32,8 @@ floor" cannot just be a fixed world-z cutoff. The model built here is:
 
 `FloorModel.height_above_floor(points)` then gives a signed distance to the
 local floor (positive above), used by the fusion pass to drop below-floor
-returns (LiDAR multipath reflections off glossy floors, mainly) and by
-`refine_mesh.py` to clip and flatten.
+returns (LiDAR multipath reflections off glossy floors, mainly), and by
+`map_refinement.py` to find the synthetic floor and fit the enclosure.
 """
 import json
 
