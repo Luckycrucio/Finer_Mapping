@@ -490,6 +490,7 @@ gz sim outputs/coverage1/gazebo/coverage1_world.sdf    # open the result in Gaze
 | `enclosure` | Adds one-sided inward walls on a robust fit of the floor footprint, and a roof at the highest vertex left | 20.7 x 19.1 m, roof 4.53 m |
 | `floor` | Completes the floor's missing cells up to the walls; the existing floor is kept | +17,478 cells (15.7 m²) |
 | `clip` | Drops geometry, including the floor, more than 10 cm outside the walls | -75k triangles |
+| `occupancy` | Export: Nav2 occupancy grid (`.pgm` + `.yaml`) of everything but the floor, 5 cm cells, 0-1.5 m above the floor | 425x395 cells: 43k occupied, 117k free |
 | `texture` | Export: decimated, UV-unwrapped, texture-baked visual mesh | 810k triangles, 7895x3100 texture |
 | `collision` | Export: very coarse collision mesh | 22k triangles |
 | `gazebo` | Export: `model.sdf`/`model.config` around the two meshes, plus a world | |
@@ -663,7 +664,7 @@ and the fit into `enclosure_fit.png`.
 | `--input` | `outputs/<name>/<name>_finer_mesh.ply` | Mesh to refine |
 | `--floor-model` / `--build-report` | next to `--input` | The build's `floor_model.npz` / `finer_map_report.json` |
 | `--out-dir` | `--input`'s directory | Where the refined map and report go |
-| `--steps` | `cleanup,enclosure,floor,clip,texture,collision,gazebo` | Comma-separated steps to run, in order; `""` runs none |
+| `--steps` | `cleanup,enclosure,floor,clip,occupancy,texture,collision,gazebo` | Comma-separated steps to run, in order; `""` runs none |
 | `--formats` | `ply` | Any of `ply,obj,stl` (only PLY keeps vertex colour) |
 | `--enclosure-core-radius` | 1.0 m | Opening radius: floor parts narrower than twice this are removed before fitting |
 | `--enclosure-cell` | 0.05 m | Raster cell of the floor footprint |
@@ -690,6 +691,48 @@ This step drops every face (except the enclosure's own) whose centroid lies
 more than `--clip-margin` (0.1 m) outside the walls: the corridor, the
 rooms seen through doors, and the floor's door spikes. The margin keeps an object that touches a wall
 from being cut flush with it.
+
+### Step `occupancy`: the Nav2 map (`src/refinement/occupancy.py`)
+
+This step writes `outputs/<name>/nav2/<name>_map.pgm` + `<name>_map.yaml`,
+a 2-D occupancy grid in the format of Nav2's `map_server`. Load it with
+`ros2 run nav2_map_server map_server --ros-args -p yaml_filename:=<...>.yaml`
+or in a Nav2 launch file.
+
+- **Points:** every triangle except the floor's (the scanned geometry and
+  the enclosure walls) is sampled densely enough that no cell is skipped:
+  its vertices, plus a barycentric grid of points at most half a cell
+  apart on triangles larger than that.
+- **Occupied:** a cell is occupied if any of those points lies between
+  `--occupancy-min-height` (0 m) and `--occupancy-max-height` (1.5 m)
+  above the local floor. Heights come from the floor model, not from z,
+  because the map frame is tilted ~2° and z alone would drift by
+  decimetres across the room.
+- **Free:** a cell is free if the floor covers it and nothing occupies it.
+  The floor is never an obstacle; it only separates free space from
+  unknown.
+- **Unknown:** everything else (outside the walls).
+- **Encoding:** trinary, with occupied 0, free 254 and unknown 205, like
+  `map_saver`.
+  - The cell size is `--occupancy-resolution` (5 cm).
+  - The image's top row is the largest y.
+  - The yaml's `origin` is the bottom-left corner of the bottom-left cell.
+  - The grid uses the same x-y frame as the meshes, so it lines up with
+    the Gazebo map.
+- **On coverage1:** 425 × 395 cells (21.3 × 19.8 m): 43k occupied, 117k
+  free and 8k unknown. It takes ~4 s.
+- **What is left to Nav2:**
+  - Obstacle inflation (the robot's footprint and safety margin) is done
+    by Nav2's costmap, not baked into the map.
+  - Objects appear as outlines whose insides are free: the floor was
+    completed under them, but they are closed, so no path reaches them.
+  - The walls close the room, so doorways are blocked as well.
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--occupancy-resolution` | 0.05 m | Cell size |
+| `--occupancy-min-height` | 0.0 m | Obstacles start this high above the floor |
+| `--occupancy-max-height` | 1.5 m | Obstacles end this high above the floor |
 
 ### Step `texture`: the detailed visual mesh (`src/refinement/texture.py`)
 
@@ -810,6 +853,7 @@ each.
 | `outputs/<name>/<name>_finer_mesh.ply` | The build's only mesh: fused geometry plus the synthetic floor, per-vertex RGB, shifted in z so the floor is at z = 0 under the GLIM origin (`build_finer_map.py`) |
 | `outputs/<name>/<name>_refined_map.ply` | Simulation map from `map_refinement.py`: the build's mesh, cleaned of small fragments, plus enclosing walls and roof, per-vertex RGB, same frame |
 | `outputs/<name>/gazebo/<name>_map/` | Gazebo model: `model.sdf`, `model.config`, `meshes/visual.obj` + `.mtl` + `visual_<page>.png` (textured visual), `meshes/collision.stl` (coarse collision) |
+| `outputs/<name>/nav2/<name>_map.pgm`, `<name>_map.yaml` | Nav2 `map_server` occupancy grid: 5 cm cells, obstacles 0-1.5 m above the floor |
 | `outputs/<name>/gazebo/<name>_world.sdf` | Gazebo world containing the map model (`gz sim` it directly) |
 | `outputs/<name>/map_refinement_report.json` | Refinement steps run, their parameters, measurements (e.g. the fitted quadrilateral) and runtimes |
 | `outputs/<name>/enclosure_fit.png` | Optional (`--enclosure-plot`): opened floor footprint, its margin and the fitted quadrilateral |
@@ -826,6 +870,7 @@ each.
 | `src/refinement/geometry.py` | Mesh helpers: pyfqmr decimation, normals, broken triangles |
 | `src/refinement/clip.py` | Map refinement step `clip` |
 | `src/refinement/floor_fill.py` | Map refinement step `floor`: completes the floor up to the walls |
+| `src/refinement/occupancy.py` | Export step `occupancy`: Nav2 occupancy grid |
 | `src/refinement/texture.py`, `collision.py`, `gazebo.py` | Export steps: textured visual mesh, coarse collision mesh, Gazebo model/world |
 | `src/refinement/cleanup.py` | Map refinement step `cleanup`: broken triangles, ceiling cut, small disconnected components |
 | `src/refinement/enclosure.py` | Map refinement step `enclosure`: opened floor footprint, robust quadrilateral fit, inward-facing walls and roof |

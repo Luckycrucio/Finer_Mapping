@@ -26,6 +26,8 @@ geometry. Steps (see src/refinement/; --steps picks a subset/order):
   floor      Complete the floor's missing cells up to the enclosure's
              quadrilateral, keeping the existing floor.
   clip       Remove geometry outside the enclosure.
+  occupancy  Export: Nav2 occupancy grid (.pgm + .yaml) of everything but the
+             floor, 5 cm cells, obstacles 0-1.5 m above the floor.
   texture    Export: decimated, UV-unwrapped, texture-baked visual mesh
              (OBJ + MTL + PNG).
   collision  Export: very coarse collision mesh (STL).

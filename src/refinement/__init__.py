@@ -8,6 +8,7 @@ from .collision import CollisionStep
 from .enclosure import EnclosureStep
 from .floor_fill import FloorStep
 from .gazebo import GazeboStep
+from .occupancy import OccupancyStep
 from .texture import TextureStep
 
-STEPS = [CleanupStep, EnclosureStep, FloorStep, ClipStep, TextureStep, CollisionStep, GazeboStep]
+STEPS = [CleanupStep, EnclosureStep, FloorStep, ClipStep, OccupancyStep, TextureStep, CollisionStep, GazeboStep]

@@ -8,6 +8,7 @@
     "enclosure",
     "floor",
     "clip",
+    "occupancy",
     "texture",
     "collision",
     "gazebo"
@@ -36,7 +37,7 @@
     "ceiling_detected": true,
     "ceiling_cut_height_m": 4.467,
     "ceiling_triangles_removed": 463271,
-    "seconds": 3.57
+    "seconds": 2.24
   },
   "enclosure": {
     "corners_xy": [
@@ -96,7 +97,7 @@
     ],
     "vertices": 307695,
     "triangles": 610420,
-    "seconds": 1.0
+    "seconds": 0.72
   },
   "floor": {
     "cell_m": 0.03,
@@ -104,12 +105,35 @@
     "area_added_m2": 15.73,
     "triangles_added": 34956,
     "vertices_added": 16756,
-    "seconds": 0.46
+    "seconds": 0.3
   },
   "clip": {
     "margin_m": 0.1,
     "triangles_removed": 73970,
-    "seconds": 0.93
+    "seconds": 0.63
+  },
+  "occupancy": {
+    "resolution_m": 0.05,
+    "height_band_m": [
+      0.0,
+      1.5
+    ],
+    "size_cells": [
+      425,
+      395
+    ],
+    "origin_xy_m": [
+      -7.45,
+      -0.85
+    ],
+    "occupied_cells": 43074,
+    "free_cells": 116553,
+    "unknown_cells": 8248,
+    "files": [
+      "/home/autosweep/finer_mapping/outputs/coverage1/nav2/coverage1_map.pgm",
+      "/home/autosweep/finer_mapping/outputs/coverage1/nav2/coverage1_map.yaml"
+    ],
+    "seconds": 3.82
   },
   "texture": {
     "texel_m": 0.015,
@@ -129,18 +153,18 @@
       "/home/autosweep/finer_mapping/outputs/coverage1/gazebo/coverage1_map/meshes/visual.mtl",
       "/home/autosweep/finer_mapping/outputs/coverage1/gazebo/coverage1_map/meshes/visual_0.png"
     ],
-    "seconds": 39.82
+    "seconds": 26.2
   },
   "collision": {
     "triangles": 22010,
     "fused_triangles": 20000,
     "file": "/home/autosweep/finer_mapping/outputs/coverage1/gazebo/coverage1_map/meshes/collision.stl",
-    "seconds": 7.96
+    "seconds": 4.57
   },
   "gazebo": {
     "model_dir": "/home/autosweep/finer_mapping/outputs/coverage1/gazebo/coverage1_map",
     "world": "/home/autosweep/finer_mapping/outputs/coverage1/gazebo/coverage1_world.sdf",
     "seconds": 0.0
   },
-  "seconds": 59.82
+  "seconds": 43.43
 }
