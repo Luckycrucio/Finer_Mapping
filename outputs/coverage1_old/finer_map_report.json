@@ -22,6 +22,18 @@
   "floor_filter": true,
   "floor_margin_m": 0.05,
   "ceiling_height_m": null,
+  "floor_band_m": 0.05,
+  "floor_normal_angle_deg": 30.0,
+  "floor_fill_radius_m": 0.15,
+  "floor_slab": {
+    "top": "model",
+    "thickness_m": 0.0,
+    "area_m2": 387.89,
+    "observed_floor_pct_of_area": 88.4,
+    "vertices": 433908,
+    "triangles": 861984
+  },
+  "output_z_offset_m": 0.50022,
   "floor_model": {
     "normal": [
       -0.004606,
@@ -41,25 +53,26 @@
     ]
   },
   "points_dropped_by_floor_ceiling": 5634773,
+  "points_floor_not_fused": 20060789,
   "carve_ray_stride": 8,
   "carve_weight": 0.2,
-  "carve_floor_clearance_m": 0.1,
-  "free_space_voxel_updates": 142527066,
+  "carve_floor_clearance_m": 0.0,
+  "free_space_voxel_updates": 174861305,
   "scans_read": 3113,
   "scans_fused": 3009,
-  "points_fused": 142435154,
+  "points_fused": 122374365,
   "points_coloured_from_rgb_pct": 17.304301155878978,
   "intensity_normalisation_range": [
     7.0,
     1166.0
   ],
-  "vertices": 1939398,
-  "triangles": 3430818,
+  "vertices": 2016532,
+  "triangles": 3595099,
   "grid_dims": [
     976,
     933,
     269
   ],
-  "observed_voxels": 9915498,
+  "observed_voxels": 9604163,
   "total_voxels": 244953552
 }

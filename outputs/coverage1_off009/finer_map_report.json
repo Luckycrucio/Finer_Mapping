@@ -1,7 +1,10 @@
 {
   "name": "coverage1",
   "bag": "/home/autosweep/autosweep/dataset22jul/coverage1_lipede",
-  "map_dir": "/home/autosweep/autosweep/glim_maps/coverage1",
+  "map_dir": "/home/autosweep/autosweep/glim_maps/coverage1_off009",
+  "points_time_offset_s": 0.09,
+  "points_time_offset_source": "/home/autosweep/autosweep/glim_maps/coverage1_off009/config/config_ros.json",
+  "image_time_offset_s": -0.06,
   "voxel_size_m": 0.03,
   "truncation_distance_m": 0.12,
   "min_range_m": 0.5,
@@ -12,9 +15,9 @@
   "padding_m": 6.0,
   "padding_below_floor_m": 0.5,
   "tsdf_bounds_min": [
-    -12.0,
+    -11.91,
     -5.67,
-    -1.29
+    -1.38
   ],
   "max_image_dt_s": 0.09,
   "intensity_color_weight": 0.02,
@@ -28,51 +31,51 @@
   "floor_slab": {
     "top": "model",
     "thickness_m": 0.0,
-    "area_m2": 387.89,
-    "observed_floor_pct_of_area": 88.4,
-    "vertices": 433908,
-    "triangles": 861984
+    "area_m2": 380.72,
+    "observed_floor_pct_of_area": 89.2,
+    "vertices": 425738,
+    "triangles": 846034
   },
-  "output_z_offset_m": 0.50022,
+  "output_z_offset_m": 0.600166,
   "floor_model": {
     "normal": [
-      -0.004606,
-      -0.034252,
-      0.999403
+      -0.000567,
+      -0.038517,
+      0.999258
     ],
-    "offset_m": 0.509004,
-    "tilt_from_world_z_deg": 1.981,
+    "offset_m": 0.608424,
+    "tilt_from_world_z_deg": 2.208,
     "cell_size_m": 1.0,
     "grid_shape": [
       24,
       23
     ],
     "cell_correction_range_m": [
-      -0.0312,
-      0.0717
+      -0.0316,
+      0.051
     ]
   },
-  "points_dropped_by_floor_ceiling": 5634773,
-  "points_floor_not_fused": 20060789,
+  "points_dropped_by_floor_ceiling": 4830751,
+  "points_floor_not_fused": 21237792,
   "carve_ray_stride": 8,
   "carve_weight": 0.2,
   "carve_floor_clearance_m": 0.0,
-  "free_space_voxel_updates": 174861305,
+  "free_space_voxel_updates": 106401943,
   "scans_read": 3113,
-  "scans_fused": 3009,
-  "points_fused": 122374365,
-  "points_coloured_from_rgb_pct": 17.304301155878978,
+  "scans_fused": 3011,
+  "points_fused": 122105428,
+  "points_coloured_from_rgb_pct": 17.266382742064813,
   "intensity_normalisation_range": [
     7.0,
     1166.0
   ],
-  "vertices": 2016532,
-  "triangles": 3595099,
+  "vertices": 1891231,
+  "triangles": 3398956,
   "grid_dims": [
-    976,
-    933,
-    269
+    967,
+    938,
+    270
   ],
-  "observed_voxels": 9604163,
-  "total_voxels": 244953552
+  "observed_voxels": 7818081,
+  "total_voxels": 244902420
 }

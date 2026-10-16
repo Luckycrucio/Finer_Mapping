@@ -1,0 +1,170 @@
+{
+  "name": "coverage1",
+  "input": "outputs/coverage1_off009/coverage1_finer_mesh.ply",
+  "floor_model": "outputs/coverage1_off009/floor_model.npz",
+  "build_report": "outputs/coverage1_off009/finer_map_report.json",
+  "steps": [
+    "cleanup",
+    "enclosure",
+    "floor",
+    "clip",
+    "occupancy",
+    "texture",
+    "collision",
+    "gazebo"
+  ],
+  "input_mesh": {
+    "vertices": 1891221,
+    "triangles": 3398939,
+    "fused_triangles": 2552905,
+    "floor_triangles": 846034,
+    "enclosure_triangles": 0
+  },
+  "output_mesh": {
+    "vertices": 1897479,
+    "triangles": 3604890,
+    "fused_triangles": 2114339,
+    "floor_triangles": 865999,
+    "enclosure_triangles": 624552,
+    "vertices_after_merge": 1895846
+  },
+  "cleanup": {
+    "broken_triangles_removed": 14,
+    "min_triangles": 200,
+    "small_pieces_removed": 8704,
+    "small_piece_triangles_removed": 57786,
+    "ceiling_height_m": 4.941,
+    "ceiling_detected": true,
+    "ceiling_cut_height_m": 4.841,
+    "ceiling_triangles_removed": 285942,
+    "seconds": 2.03
+  },
+  "enclosure": {
+    "corners_xy": [
+      [
+        -6.6528,
+        -0.8272
+      ],
+      [
+        13.7149,
+        0.053
+      ],
+      [
+        12.9552,
+        19.1018
+      ],
+      [
+        -7.3596,
+        18.0217
+      ]
+    ],
+    "side_lengths_m": [
+      20.3867,
+      19.0639,
+      20.3435,
+      18.8621
+    ],
+    "interior_angles_deg": [
+      89.673,
+      90.191,
+      89.24,
+      90.896
+    ],
+    "initial_rectangle": [
+      [
+        -6.7807,
+        -1.332
+      ],
+      [
+        13.9639,
+        -0.5303
+      ],
+      [
+        13.2039,
+        19.134
+      ],
+      [
+        -7.5407,
+        18.3323
+      ]
+    ],
+    "margin_median_distance_m": 0.0963,
+    "roof_height_above_floor_plane_m": 4.8914,
+    "roof_color_rgb": [
+      94,
+      93,
+      91
+    ],
+    "vertices": 314747,
+    "triangles": 624552,
+    "seconds": 0.69
+  },
+  "floor": {
+    "cell_m": 0.03,
+    "cells_added": 16743,
+    "area_added_m2": 15.07,
+    "triangles_added": 33486,
+    "vertices_added": 16036,
+    "seconds": 0.29
+  },
+  "clip": {
+    "margin_m": 0.1,
+    "triangles_removed": 108345,
+    "seconds": 0.61
+  },
+  "occupancy": {
+    "resolution_m": 0.05,
+    "height_band_m": [
+      0.0,
+      1.5
+    ],
+    "size_cells": [
+      426,
+      402
+    ],
+    "origin_xy_m": [
+      -7.5,
+      -0.9
+    ],
+    "occupied_cells": 41567,
+    "free_cells": 115382,
+    "unknown_cells": 14303,
+    "files": [
+      "outputs/coverage1_off009/nav2/coverage1_map.pgm",
+      "outputs/coverage1_off009/nav2/coverage1_map.yaml"
+    ],
+    "seconds": 3.65
+  },
+  "texture": {
+    "texel_m": 0.015,
+    "fused_keep_fraction": 0.3,
+    "fused_triangles": 634301,
+    "fused_tiles": 32,
+    "triangles": 652256,
+    "vertices": 590997,
+    "pages": [
+      [
+        8179,
+        2360
+      ]
+    ],
+    "files": [
+      "outputs/coverage1_off009/gazebo/coverage1_map/meshes/visual.obj",
+      "outputs/coverage1_off009/gazebo/coverage1_map/meshes/visual.mtl",
+      "outputs/coverage1_off009/gazebo/coverage1_map/meshes/visual_0.png"
+    ],
+    "seconds": 26.11
+  },
+  "collision": {
+    "triangles": 22010,
+    "fused_triangles": 20000,
+    "file": "outputs/coverage1_off009/gazebo/coverage1_map/meshes/collision.stl",
+    "seconds": 4.41
+  },
+  "gazebo": {
+    "model_dir": "outputs/coverage1_off009/gazebo/coverage1_map",
+    "world": "outputs/coverage1_off009/gazebo/coverage1_world.sdf",
+    "seconds": 0.0
+  },
+  "seconds": 42.02
+}

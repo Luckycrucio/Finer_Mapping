@@ -87,6 +87,35 @@ are used — the raw bag starts about 10.6 s before GLIM's first solved pose
 (before enough data had accumulated to initialize global mapping), and those
 early scans are skipped rather than extrapolated.
 
+## Sensor time offsets (LiDAR and camera)
+
+Both sensors' timestamps need a correction before scans, images and GLIM's
+trajectory line up in time.
+
+| Sensor | Problem | Correction | Value (coverage1) | Set by |
+|---|---|---|---|---|
+| LiDAR (`/ouster/points`) | The driver stamps each scan with the *previous* scan's time | capture time = header stamp **+ 0.09 s** | +0.09 s | `--points-time-offset`, default read from the GLIM map's `config/config_ros.json` (`points_time_offset`) |
+| Camera (`/rgb/image_raw`) | Frames are stamped ~60 ms *after* capture | capture time = header stamp **− 0.06 s** | −0.06 s | `--image-time-offset` (default −0.06), measured with `measure_camera_time_offset.py` |
+
+- **LiDAR offset:** it has to match the one GLIM was run with. GLIM adds
+  it to every scan's stamp, so its trajectory is in that corrected clock.
+  This is checked against the data: GLIM map `coverage1_off009` (run with
+  0.09 s) has every trajectory keyframe stamped exactly at a scan's header
+  stamp + 0.09 s. With that offset, turning scans line up best
+  (2.4 cm median scan-to-scan distance, against 4.1 cm with no offset).
+- **Camera offset:** it is measured against that same corrected
+  trajectory, by projecting the LiDAR's object outlines into frames taken
+  while turning and finding the time shift that lands them on the image
+  edges. The −0.06 s is specific to this camera and driver; for another
+  setup, re-run `measure_camera_time_offset.py`.
+- **Where they're used:** both are logged at the start of a build and
+  recorded in `finer_map_report.json` (`points_time_offset_s`,
+  `image_time_offset_s`). Details are in pipeline steps 2 (LiDAR) and 5
+  (camera) below, and in "Measuring the camera time offset".
+- **Earlier builds:** a GLIM map built without the LiDAR offset (such as
+  `glim_maps/coverage1`) gets 0 from its config, so the build behaves as
+  before for that map.
+
 ## Pipeline (`build_finer_map.py`)
 
 Passes over the bag: (1) cache camera frames, (2) estimate an intensity
@@ -111,6 +140,32 @@ platform motion into the geometry. This pipeline instead reads the Ouster
 in a column simultaneously (confirmed directly against the raw bag: the `t`
 field is identical across all rows for a fixed column), this only costs one
 trajectory interpolation per column (1024) rather than per point (~65,000).
+
+**LiDAR time offset.** The Ouster driver stamps each scan with the
+*previous* scan's time, so header stamps lag the real capture time by about
+one revolution. GLIM corrects this with `glim_ros.points_time_offset`, which
+it adds to every point cloud's header stamp; its trajectory
+(`traj_lidar.txt`) is then stamped in that corrected time. The scans must be
+read the same way, or every pose is looked up 0.09 s off.
+
+- **The correction:** a point's capture time is `header stamp + offset +
+  column t`. `--points-time-offset` sets the offset. By default it is read
+  from the GLIM map's own `config/config_ros.json`, so it always matches the
+  trajectory being used, and it is 0 if that file doesn't set it.
+- **Everything follows from the corrected time:** trajectory interpolation
+  and deskewing, the trajectory-coverage check, floor estimation, and the
+  choice of camera frame for colour. Camera stamps are not affected.
+- **Recording:** the value and where it came from are logged and recorded
+  in `finer_map_report.json` (`points_time_offset_s`,
+  `points_time_offset_source`).
+- **Verified on coverage1.** With GLIM run at 0.09 s
+  (`glim_maps/coverage1_off009`), every trajectory keyframe is stamped
+  exactly at a scan's header stamp + 0.09 s. The earlier map
+  (`coverage1`, offset 0) matches header + 0.
+- **Effect on geometry:** scans 0.6 s apart while the robot turns at
+  ~40°/s line up best at +0.09 s, with a median scan-to-scan distance of
+  2.4 cm against 4.1 cm at 0. The error grows on both sides: 3.3 cm at
+  0.045 s and 0.135 s, and 4.1 cm at 0.18 s.
 
 ### 3. Organized-cloud preprocessing (`src/ouster_scan.py`)
 
@@ -285,6 +340,35 @@ It will *not* catch occlusion from geometry outside the current scan (e.g. a
 thin object mapped in an earlier scan that no longer occludes now) — a known,
 documented limitation, not a silent one.
 
+**Camera time offset.** "The image's own capture time" is its header stamp
+plus `--image-time-offset`. The camera driver stamps frames about 60 ms
+*after* capture, so the default is −0.06 s.
+
+- **Where it applies:** to the cached stamps when they are loaded. The
+  cache itself keeps the raw stamps and doesn't need rebuilding.
+- **What it affects:** both the choice of frame for each scan column and
+  the camera pose the points are projected from.
+- **Why it matters:** the camera pose comes from GLIM's trajectory, which
+  is in the corrected LiDAR clock (see the LiDAR time offset in step 2). A
+  frame stamped 60 ms late is projected from where the camera was 60 ms
+  later. While the robot turns at 40°/s that is 2.4°, so colours slide
+  ~20 cm off the geometry on a wall 5 m away. When driving straight it is
+  negligible.
+- **Measuring it:** `measure_camera_time_offset.py` finds the offset from
+  the data:
+  - It takes camera frames shot while the robot turns fastest.
+  - It projects the LiDAR silhouettes (range-jump edges) measured at the
+    same moment into each frame, using the camera pose at stamp + d for a
+    range of candidate offsets d.
+  - It keeps the d at which the silhouettes best land on the image's edges
+    (mean blurred gradient magnitude).
+- **On coverage1** (GLIM map `coverage1_off009`, LiDAR offset +0.09 s):
+  - The peak is at **−0.062 s** (16 frames; per-frame median −0.07 s).
+  - With 0, the camera is 60 ms out.
+  - The earlier GLIM map, without the LiDAR correction, peaks at −0.15 s.
+    That is the same −0.06 s plus its 0.09 s LiDAR error, so the two
+    timing corrections are independent and add up.
+
 Points with no camera frame close enough in time, that land outside the
 image, are behind the camera, or lose the z-buffer test fall back to a
 percentile-normalised (1st/99th) grayscale of LiDAR intensity, using the same
@@ -386,6 +470,7 @@ mesh is cleaned and given consistent normals with VTK before export
 | `--datasets-root` / `--maps-root` | `~/autosweep/dataset22jul` / `~/autosweep/glim_maps` | Where the bags and GLIM maps live |
 | `--bag` / `--map-dir` | derived from `<name>` | Override either input directory separately |
 | `--points-topic` / `--image-topic` | `/ouster/points` / `/rgb/image_raw` | Sensor topics (Dome bags record `/ousterDome/points`) |
+| `--points-time-offset` | from the GLIM map | Seconds added to every LiDAR header stamp (GLIM's `points_time_offset`); read from `<map-dir>/config/config_ros.json`, 0 if unset there |
 | `--out-dir` / `--cache-dir` | `outputs/<name>` / `cache/<name>` | Where results and the camera frame cache go |
 | `--voxel-size` | 0.03 m | TSDF voxel edge length — the main detail/memory/runtime dial |
 | `--truncation` | 4 x voxel size | Half-width of the band around each surface point that gets updated |
@@ -394,6 +479,7 @@ mesh is cleaned and given consistent normals with VTK before export
 | `--edge-jump` | 0.3 m | Within-ring range-discontinuity threshold for edge/mixed-pixel filtering |
 | `--padding` | 6.0 m | Metres of TSDF volume padding around the trajectory bounding box (all faces except the bottom when a floor model exists) |
 | `--padding-below-floor` | 0.5 m | Bottom face of the volume: this far below the lowest point of the floor model (nothing is ever observed under the floor) |
+| `--image-time-offset` | −0.06 s | Seconds added to every camera frame's header stamp to get its capture time in the trajectory's clock (measured with `measure_camera_time_offset.py`) |
 | `--max-image-dt` | 0.09 s | Max time gap between a scan column and the camera frame used to colour it |
 | `--intensity-color-weight` | 0.02 | Weight of an intensity-grayscale sample in a voxel's colour average, relative to an RGB sample (1.0 = equal blend) |
 | `--min-weight` | 1.5 | Minimum accumulated TSDF weight for a voxel to count as observed |
@@ -446,6 +532,27 @@ stops early with a list of any missing inputs. `--bag-suffix ""` reads the
 plain recording instead, and `--bag`/`--map-dir` override either path
 entirely.
 
+To build from a GLIM map run with a different name, such as the
+time-offset-corrected `coverage1_off009`, keep the bag name and point
+`--map-dir` at it. Give it its own output directory so the earlier build
+isn't overwritten:
+
+```bash
+python3 build_finer_map.py coverage1 \
+    --map-dir /home/autosweep/autosweep/glim_maps/coverage1_off009 \
+    --out-dir outputs/coverage1_off009 --skip-frame-cache
+python3 map_refinement.py coverage1 --input outputs/coverage1_off009/coverage1_finer_mesh.ply
+```
+
+The LiDAR time offset (0.09 s) is then taken from that map's config, and
+the camera's (−0.06 s) is the default. The camera-frame cache
+(`cache/coverage1/`) does not depend on either offset, so
+`--skip-frame-cache` reuses it.
+
+A different GLIM run has its own world frame (the floor's tilt differs
+slightly), so don't pass another run's `floor_model.npz` with
+`--floor-model`.
+
 `.venv` was created with `--system-site-packages` so it inherits this
 machine's ROS 2 Jazzy install (`rclpy`, `rosbag2_py`, `sensor_msgs_py`,
 `cv_bridge`) and system OpenCV/VTK, adding only `scikit-image` on top (see
@@ -461,6 +568,23 @@ pip install -r requirements.txt
 `cache/<name>/` (camera frame JPEGs + timestamps, ~900 MB per bag) is produced by the first
 run's pass 1 and reused on subsequent runs via `--skip-frame-cache`; delete
 it to force re-extraction (e.g. after pointing `--bag` at different data for the same name).
+
+### Measuring the camera time offset
+
+```bash
+python3 measure_camera_time_offset.py coverage1 \
+    --map-dir /home/autosweep/autosweep/glim_maps/coverage1_off009
+```
+
+- **Inputs:** the same bag and GLIM map arguments as the build, plus the
+  build's camera frame cache (`cache/<name>/`, so run the build's pass 1
+  first). The LiDAR time offset again defaults to the GLIM map's.
+- **Output:** the alignment score for every candidate offset (−0.25 to
+  +0.10 s in 10 ms steps, `--search`/`--step`), the best offset (refined
+  between grid steps) and the spread of the per-frame peaks, ending with
+  the `--image-time-offset` value to pass to `build_finer_map.py`.
+- **When to run it:** once per camera/driver setup, or whenever the GLIM
+  LiDAR offset changes. It takes ~1 minute.
 
 ## Visualizing the output
 
@@ -881,6 +1005,7 @@ each.
 | `src/tsdf_volume.py` | The TSDF grid: integration, free-space carving and marching-cubes mesh extraction |
 | `src/bagio.py` | Small rosbag2 reading helpers |
 | `build_finer_map.py` | Driver script tying the above together |
+| `measure_camera_time_offset.py` | Measures the camera's time offset against the trajectory (`--image-time-offset`) |
 | `map_refinement.py` | Post-processing driver running the refinement steps on a finished build |
 
 ## Known limitations

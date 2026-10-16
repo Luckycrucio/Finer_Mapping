@@ -16,6 +16,13 @@ search over an unorganized cloud:
 
 All Ouster invalid returns (`range == 0`) already come through as NaN x/y/z
 from the ROS driver, confirmed by inspecting the raw bag.
+
+Scan timing: a point's capture time is the message's header stamp plus its
+per-column `t` offset, plus `time_offset_s`. The latter corrects a driver
+bug that stamps a scan with the previous scan's time (it lags by about one
+revolution); it must be the same `points_time_offset` GLIM was run with,
+because GLIM adds it to every header stamp and its trajectory is stamped in
+that corrected time.
 """
 import numpy as np
 from sensor_msgs_py import point_cloud2
@@ -24,7 +31,7 @@ FIELDS = ["x", "y", "z", "intensity", "t", "ring", "range"]
 
 
 class OrganizedScan:
-    def __init__(self, msg):
+    def __init__(self, msg, time_offset_s=0.0):
         structured = point_cloud2.read_points(msg, field_names=FIELDS, skip_nans=False)
         arr = structured.reshape(msg.height, msg.width)
 
@@ -36,7 +43,8 @@ class OrganizedScan:
         # All 64 beams fire simultaneously per column, so a per-column time is exact
         # (confirmed identical across rows for a fixed column in the raw bag).
         self._column_time_ns = arr["t"][0, :].astype(np.int64)
-        self.header_stamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+        # corrected scan start time (see the module docstring)
+        self.header_stamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9 + time_offset_s
         self.valid = self.range_m > 0.0
 
     def column_times_s(self):

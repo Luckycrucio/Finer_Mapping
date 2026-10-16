@@ -34,6 +34,9 @@ because the scene is a single room-scale indoor map -- see the README for the
 memory-vs-voxel-size trade-off.
 """
 import numpy as np
+# imported at load time, not in extract_mesh: a missing scikit-image (e.g. run
+# outside .venv) must fail at startup, not after hours of fusion
+from skimage.measure import marching_cubes
 
 
 class TSDFVolume:
@@ -166,8 +169,6 @@ class TSDFVolume:
         return len(linear)
 
     def extract_mesh(self, min_weight=1.0):
-        from skimage.measure import marching_cubes
-
         weight = self.weight.reshape(self.dims)
         wsdf = self.wsdf.reshape(self.dims)
         wcolor = self.wcolor.reshape(*self.dims, 3)

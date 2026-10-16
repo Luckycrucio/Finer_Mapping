@@ -16,6 +16,13 @@ close-enough frame, land outside the image, are behind the camera, or lose
 the z-buffer test fall back to a percentile-normalised grayscale of LiDAR
 intensity (the same convention as the existing coverage1_edited pipeline's
 color_intensity.py).
+
+Camera timing: a frame's capture time is its header stamp plus
+`time_offset_s` (negative here: the camera driver stamps frames after they
+were captured; measure it with measure_camera_time_offset.py). The cache
+keeps the raw stamps; the offset is applied on load, so `timestamps` is the
+corrected capture time, used both to pick the frame nearest a scan column
+and to look up the camera's pose.
 """
 import functools
 from pathlib import Path
@@ -64,9 +71,10 @@ def cache_frames(reader_factory, image_topic, cache_dir, log=print):
 
 class FrameColorizer:
     def __init__(self, cache_dir, sensor_config, max_dt=0.09,
-                 intensity_lo_pct=1.0, intensity_hi_pct=99.0, lru_frames=8):
+                 intensity_lo_pct=1.0, intensity_hi_pct=99.0, lru_frames=8, time_offset_s=0.0):
         cache_dir = Path(cache_dir)
-        self.timestamps = np.load(cache_dir / "timestamps.npy")
+        # corrected capture times (see the module docstring)
+        self.timestamps = np.load(cache_dir / "timestamps.npy") + time_offset_s
         self.frames_dir = cache_dir / "frames"
         self.K = sensor_config.K
         self.D = sensor_config.D

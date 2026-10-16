@@ -19,7 +19,9 @@ See README.md for the full pipeline explanation. Summary:
      then SVD plane fit on horizontal surfaces near the sensor, plus a coarse
      per-cell height correction (`src.floor`).
   4. Stream every raw /ouster/points scan from the bag (NOT the downsampled
-     points GLIM's own map already stored) and, per scan:
+     points GLIM's own map already stored) and, per scan (timed as header
+     stamp + --points-time-offset, GLIM's own LiDAR offset by default; camera
+     frames as header stamp + --image-time-offset):
        - drop invalid returns and within-ring depth-discontinuity edge noise
          using the organized (ring, column) layout (`src.ouster_scan`),
        - deskew every point into the world frame using the trajectory pose at
@@ -72,6 +74,8 @@ IMAGE_TOPIC = "/rgb/image_raw"
 DATASETS_ROOT = "/home/autosweep/autosweep/dataset22jul"
 MAPS_ROOT = "/home/autosweep/autosweep/glim_maps"
 BAG_SUFFIX = "_lipede"
+# camera frames are stamped ~60 ms after capture (measure_camera_time_offset.py on coverage1)
+IMAGE_TIME_OFFSET = -0.06
 
 
 def parse_args():
@@ -88,6 +92,11 @@ def parse_args():
     p.add_argument("--map-dir", default=None,
                    help="override the GLIM map directory providing traj_lidar.txt and "
                         "config/config_sensors.json (default: <maps-root>/<name>)")
+    p.add_argument("--points-time-offset", type=float, default=None,
+                   help="seconds added to every LiDAR scan's header stamp to get its true capture time "
+                        "(GLIM's glim_ros.points_time_offset; corrects a driver that stamps a scan with the "
+                        "previous scan's time). Default: read from <map-dir>/config/config_ros.json, so "
+                        "scans line up with the trajectory GLIM wrote; 0 if it is not set there")
     p.add_argument("--points-topic", default=POINTS_TOPIC, help="Ouster PointCloud2 topic (e.g. /ousterDome/points)")
     p.add_argument("--image-topic", default=IMAGE_TOPIC, help="camera image topic")
     p.add_argument("--out-dir", default=None, help="default: outputs/<name>")
@@ -111,6 +120,11 @@ def parse_args():
     p.add_argument("--padding-below-floor", type=float, default=0.5,
                    help="metres of TSDF volume padding below the lowest point of the floor model "
                         "(replaces --padding on the bottom face; ignored without a floor model)")
+    p.add_argument("--image-time-offset", type=float, default=IMAGE_TIME_OFFSET,
+                   help="seconds added to every camera frame's header stamp to get its true capture time, "
+                        "in the trajectory's (corrected LiDAR) clock; negative = frames are stamped after "
+                        "capture. Measured with measure_camera_time_offset.py (default: %(default)s, "
+                        "measured on coverage1)")
     p.add_argument("--max-image-dt", type=float, default=0.09,
                    help="max seconds between a scan column and the camera frame used to colour it")
     p.add_argument("--intensity-color-weight", type=float, default=0.02,
@@ -166,7 +180,26 @@ def parse_args():
                            Path(args.map_dir) / "config" / "config_sensors.json") if not f.is_file()]
     if missing:
         p.error("missing input file(s) for '%s':\n  %s" % (args.name, "\n  ".join(map(str, missing))))
+    args.points_time_offset_source = "--points-time-offset"
+    if args.points_time_offset is None:
+        args.points_time_offset, args.points_time_offset_source = glim_points_time_offset(Path(args.map_dir))
     return args
+
+
+def glim_points_time_offset(map_dir):
+    """(offset, where it came from): GLIM's glim_ros.points_time_offset from
+    the map's saved config, 0 if the file or the key is missing. GLIM adds it
+    to every point cloud's header stamp, so traj_lidar.txt is stamped in that
+    corrected time and the scans must be read the same way."""
+    path = map_dir / "config" / "config_ros.json"
+    try:
+        with open(path) as f:
+            value = json.load(f).get("glim_ros", {}).get("points_time_offset")
+    except (OSError, ValueError):
+        value = None
+    if value is None:
+        return 0.0, f"default (no points_time_offset in {path})"
+    return float(value), str(path)
 
 
 def log(msg):
@@ -210,6 +243,8 @@ def main():
     sensors = SensorConfig(map_dir / "config" / "config_sensors.json")
     trajectory = Trajectory(map_dir / "traj_lidar.txt")
     log(f"trajectory: {len(trajectory.times)} poses, t in [{trajectory.t_min:.2f}, {trajectory.t_max:.2f}]")
+    log(f"LiDAR time offset: {args.points_time_offset:+.4f} s added to every scan's header stamp "
+        f"(from {args.points_time_offset_source})")
 
     stamps_path = cache_dir / "timestamps.npy"
     if args.skip_frame_cache and stamps_path.exists():
@@ -221,7 +256,8 @@ def main():
     log("pass 2/4: estimating a global intensity normalisation range...")
     lo, hi = estimate_intensity_range(args.bag, args.points_topic)
 
-    colorizer = FrameColorizer(cache_dir, sensors, max_dt=args.max_image_dt)
+    colorizer = FrameColorizer(cache_dir, sensors, max_dt=args.max_image_dt, time_offset_s=args.image_time_offset)
+    log(f"camera time offset: {args.image_time_offset:+.4f} s added to every frame's header stamp")
     colorizer.set_intensity_range(lo, hi)
 
     floor = None
@@ -264,7 +300,7 @@ def main():
         if args.limit_scans is not None and n_scans >= args.limit_scans:
             break
 
-        prep = prepare_scan(OrganizedScan(msg), trajectory, args)
+        prep = prepare_scan(OrganizedScan(msg, args.points_time_offset), trajectory, args)
         if prep is not None and floor is not None:
             height = floor.height_above_floor(prep.points_world)
             keep = height >= -args.floor_margin
@@ -386,6 +422,9 @@ def main():
         "name": args.name,
         "bag": str(args.bag),
         "map_dir": str(args.map_dir),
+        "points_time_offset_s": args.points_time_offset,
+        "points_time_offset_source": args.points_time_offset_source,
+        "image_time_offset_s": args.image_time_offset,
         "voxel_size_m": args.voxel_size,
         "truncation_distance_m": truncation,
         "min_range_m": args.min_range,
@@ -484,7 +523,7 @@ def estimate_floor_from_bag(args, trajectory, per_scan_cap=4000):
             break
         if i % args.floor_sample_stride != 0:
             continue
-        prep = prepare_scan(OrganizedScan(msg), trajectory, args)
+        prep = prepare_scan(OrganizedScan(msg, args.points_time_offset), trajectory, args)
         if prep is None:
             continue
         sensor_up = prep.R[:, :, 2]
